@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+dist/
+build/
+.cache/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup (not for version control)
+backup/
+
+# TRAE internal
+.trae/
+.uploads/
+.trae-html-share-packages/
