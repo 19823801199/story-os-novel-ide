@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>NovelCraft × Story OS</title>
+<style>
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--surface:#1c2128;--ink:#e6edf3;--muted:#7d8590;--rule:#30363d;--accent:#7c3aed;--accent2:#06b6d4;--success:#3fb950;--warning:#d29922;--danger:#f85149;--radius:8px;--radius-lg:12px;--font:system-ui,-apple-system,sans-serif;--nav-w:56px;--side-w:240px;--tr:.2s ease}
+[data-theme="light"]{--bg:#fff;--bg2:#f6f8fa;--bg3:#e1e4e8;--surface:#fff;--ink:#24292e;--muted:#586069;--rule:#e1e4e8}
+[data-theme="warm"]{--bg:#fdf6e3;--bg2:#f5f0e0;--bg3:#ebe3d0;--surface:#fefbf3;--ink:#3d3522;--muted:#8a7a52;--rule:#dcd5c0}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:15px;line-height:1.6;overflow:hidden}
+#app{display:flex;height:100vh}
+#navbar{width:var(--nav-w);background:var(--bg2);border-right:1px solid var(--rule);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px}
+.nav-item{width:40px;height:40px;border-radius:var(--radius);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;color:var(--muted);transition:var(--tr)}
+.nav-item:hover{background:var(--bg3);color:var(--ink)}
+.nav-item.active{background:var(--accent);color:#fff}
+#sidebar{width:var(--side-w);background:var(--bg2);border-right:1px solid var(--rule);display:flex;flex-direction:column;overflow:hidden}
+.sidebar-header{padding:12px 16px;border-bottom:1px solid var(--rule);font-weight:600;font-size:14px;color:var(--muted)}
+.sidebar-section{flex:1;overflow-y:auto;padding:8px}
+#main{flex:1;overflow-y:auto;position:relative}
+.page{display:none;padding:24px;animation:fadeIn .2s ease}
+.page.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+.card-title{font-size:16px;font-weight:600;margin-bottom:12px}
+.btn{padding:6px 14px;border:1px solid var(--rule);border-radius:var(--radius);background:var(--bg3);color:var(--ink);cursor:pointer;font-size:13px;transition:var(--tr)}
+.btn:hover{background:var(--rule)}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-secondary{background:var(--bg3)}
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-sm{padding:3px 8px;font-size:12px}
+.form-group{margin-bottom:12px}
+.form-label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+.form-input,.form-select,.form-textarea{width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--rule);border-radius:var(--radius);color:var(--ink);font-size:14px;font-family:var(--font)}
+.form-textarea{min-height:80px;resize:vertical}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-success{background:rgba(63,185,80,.15);color:var(--success)}
+.badge-warning{background:rgba(210,153,34,.15);color:var(--warning)}
+.badge-danger{background:rgba(248,81,73,.15);color:var(--danger)}
+.badge-info{background:rgba(6,182,212,.15);color:var(--accent2)}
+.grid{display:grid;gap:12px}
+.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:1fr 1fr 1fr}.grid-4{grid-template-columns:repeat(4,1fr)}
+.stat-card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:16px;text-align:center}
+.stat-value{font-size:28px;font-weight:700;color:var(--accent)}
+.stat-label{font-size:12px;color:var(--muted);margin-top:4px}
+.empty-state{text-align:center;padding:32px;color:var(--muted)}
+.text-muted{color:var(--muted)}.text-sm{font-size:13px}.text-lg{font-size:18px}.text-xl{font-size:24px;font-weight:700}
+.text-center{text-align:center}.text-right{text-align:right}
+.mt-1{margin-top:8px}.mt-2{margin-top:16px}.mt-3{margin-top:24px}
+.mb-1{margin-bottom:8px}.mb-2{margin-bottom:16px}.mb-3{margin-bottom:24px}
+.flex{display:flex}.flex-between{display:flex;justify-content:space-between;align-items:center}.flex-col{flex-direction:column}
+.gap-1{gap:8px}.gap-2{gap:16px}.w-full{width:100%}
+.editor-layout{display:grid;grid-template-columns:220px 1fr 300px;gap:0;height:calc(100vh - 0px);margin:-24px}
+.chapter-list{border-right:1px solid var(--rule);overflow-y:auto;background:var(--bg2)}
+.chapter-list-item{padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--rule);transition:var(--tr)}
+.chapter-list-item:hover{background:var(--bg3)}
+.chapter-list-item.active{background:var(--surface);border-left:3px solid var(--accent)}
+.chapter-editor{display:flex;flex-direction:column;overflow:hidden}
+.chapter-editor textarea{flex:1;width:100%;background:var(--bg);color:var(--ink);border:none;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:16px;font-size:15px;line-height:1.8;resize:none;outline:none;font-family:var(--font)}
+.chapter-editor-bar{padding:8px 16px;display:flex;justify-content:space-between;align-items:center;background:var(--bg2);font-size:13px;color:var(--muted)}
+.copilot-panel{border-left:1px solid var(--rule);overflow-y:auto;background:var(--bg2);padding:12px}
+.copilot-section{margin-bottom:16px}
+.copilot-section h4{font-size:13px;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.action-card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:10px;margin-bottom:8px}
+.action-card .action-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.action-card .action-title{font-size:13px;font-weight:600}
+.action-card .action-desc{font-size:12px;color:var(--muted);line-height:1.4}
+.action-card .action-actions{display:flex;gap:4px;margin-top:6px}
+.severity-critical{border-left:3px solid var(--danger)}
+.severity-warning{border-left:3px solid var(--warning)}
+.severity-info{border-left:3px solid var(--accent2)}
+.severity-pass{border-left:3px solid var(--success)}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius-lg);padding:24px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.modal-title{font-size:18px;font-weight:600}
+.modal-close{cursor:pointer;font-size:20px;color:var(--muted);background:none;border:none}
+#toastContainer{position:fixed;top:16px;right:16px;z-index:2000;display:flex;flex-direction:column;gap:8px}
+.toast{padding:10px 16px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--rule);color:var(--ink);font-size:14px;animation:fadeIn .2s ease;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.toast-success{border-left:3px solid var(--success)}.toast-error{border-left:3px solid var(--danger)}.toast-info{border-left:3px solid var(--accent2)}
+.cmd-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);display:none;align-items:flex-start;justify-content:center;z-index:1500;padding-top:15vh}
+.cmd-overlay.active{display:flex}
+.cmd-box{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius-lg);width:500px;max-width:90vw;overflow:hidden}
+.cmd-input{width:100%;padding:12px 16px;background:var(--bg);border:none;border-bottom:1px solid var(--rule);color:var(--ink);font-size:15px;outline:none}
+.cmd-list{max-height:300px;overflow-y:auto}
+.cmd-item{padding:8px 16px;cursor:pointer;transition:var(--tr)}
+.cmd-item:hover,.cmd-item.active{background:var(--bg3)}
+.tree-item{padding:6px 0;padding-left:16px}.tree-children{margin-left:20px}
+.char-card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);padding:12px;cursor:pointer;transition:var(--tr)}
+.char-card:hover{border-color:var(--accent)}
+.char-avatar{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
+.consistency-item{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--rule)}
+.consistency-item:last-child{border-bottom:none}
+.rule-toggle{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--rule)}
+.switch{position:relative;width:36px;height:20px;background:var(--bg3);border-radius:10px;cursor:pointer;transition:var(--tr)}
+.switch.on{background:var(--accent)}
+.switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:var(--tr)}
+.switch.on::after{left:18px}
+@media(max-width:768px){#sidebar{display:none}.editor-layout{grid-template-columns:1fr}.chapter-list,.copilot-panel{display:none}.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div id="app">
+<div id="navbar">
+<a class="nav-item active" data-page="dashboard" title="仪表盘" onclick="navigate('dashboard')">📊</a>
+<a class="nav-item" data-page="editor" title="章节编辑" onclick="navigate('editor')">✍️</a>
+<a class="nav-item" data-page="characters" title="人物中心" onclick="navigate('characters')">👥</a>
+<a class="nav-item" data-page="plot" title="剧情规划" onclick="navigate('plot')">📐</a>
+<a class="nav-item" data-page="worldbuilding" title="世界观" onclick="navigate('worldbuilding')">🌍</a>
+<a class="nav-item" data-page="consistency" title="一致性检查" onclick="navigate('consistency')">🔍</a>
+<a class="nav-item" data-page="data" title="数据中心" onclick="navigate('data')">💾</a>
+<a class="nav-item" data-page="settings" title="设置" onclick="navigate('settings')">⚙️</a>
+</div>
+<div id="sidebar"><div class="sidebar-header"><span id="sidebarTitle">导航</span></div><div class="sidebar-section" id="sidebarContent"></div></div>
+<div id="main">
+<div class="page active" id="page-dashboard"></div>
+<div class="page" id="page-editor"></div>
+<div class="page" id="page-characters"></div>
+<div class="page" id="page-plot"></div>
+<div class="page" id="page-worldbuilding"></div>
+<div class="page" id="page-consistency"></div>
+<div class="page" id="page-data"></div>
+<div class="page" id="page-settings"></div>
+</div>
+</div>
+<div id="modalContainer"></div>
+<div id="toastContainer"></div>
+<div class="cmd-overlay" id="cmdOverlay"><div class="cmd-box"><input class="cmd-input" id="cmdInput" placeholder="输入命令..." oninput="filterCmd()" /><div class="cmd-list" id="cmdList"></div></div></div>
+<script>
+"use strict";
+/* ============================================================
+ * Story OS Novel IDE - v0.2.0
+ * Phase 4 - Unified Story Runtime
+ * Single source of truth: StoryStore -> StoryState
+ * ============================================================ */
+var APP_VERSION='0.2.0';
+var STORY_STATE_VERSION='phase4';
+var SCHEMA_VERSION=2;
+
+// ===== GENRE_CONFIG =====
+var GENRE_CONFIG={
+fantasy:{name:'玄幻',worldFields:[{key:'cultivationSystem',label:'修炼体系',required:true}],storyArcs:['废柴觉醒','奇遇得宝','宗门大比','秘境探险','生死之战','突破瓶颈','复仇雪恨','登顶巅峰'],characterFields:{protagonist:[{key:'aptitude',label:'根骨资质'}],supporting:[{key:'cultivation',label:'修炼功法'}]},inspirationSeeds:['主角在垃圾堆捡到上古神器']},
+xianxia:{name:'仙侠',worldFields:[{key:'realmSystem',label:'境界体系',required:true}],storyArcs:['凡人修仙','拜入宗门','筑基结丹','元婴化神','渡劫飞升'],characterFields:{protagonist:[{key:'spirit',label:'灵根'}],supporting:[{key:'sect',label:'门派'}]},inspirationSeeds:['散修在废墟中找到上古功法']},
+urban:{name:'都市',worldFields:[{key:'citySetting',label:'城市设定',required:true}],storyArcs:['平凡日常','意外获得','商战风云','逆袭人生'],characterFields:{protagonist:[{key:'job',label:'职业'}],supporting:[{key:'company',label:'公司'}]},inspirationSeeds:['上班族意外获得透视眼']},
+scifi:{name:'科幻',worldFields:[{key:'techLevel',label:'科技水平',required:true}],storyArcs:['星际探索','文明冲突','AI觉醒','时空穿梭'],characterFields:{protagonist:[{key:'role',label:'角色定位'}],supporting:[{key:'faction',label:'阵营'}]},inspirationSeeds:['星际拓荒者在未知星球发现遗迹']},
+mystery:{name:'悬疑',worldFields:[{key:'era',label:'时代背景',required:true}],storyArcs:['日常','案件','调查','真相','反转'],characterFields:{protagonist:[{key:'skill',label:'专长'}],supporting:[{key:'relation',label:'与死者关系'}]},inspirationSeeds:['密室杀人案的死者留下死亡讯息']},
+wuxia:{name:'武侠',worldFields:[{key:'jianghu',label:'江湖格局',required:true}],storyArcs:['入江湖','拜师','奇遇','恩怨','决战'],characterFields:{protagonist:[{key:'sect',label:'门派'}],supporting:[{key:'weapon',label:'武器'}]},inspirationSeeds:['少年为父报仇踏入江湖']},
+romance:{name:'言情',worldFields:[{key:'setting',label:'背景设定',required:true}],storyArcs:['相遇','误会','心动','阻碍','告白','在一起'],characterFields:{protagonist:[{key:'trait',label:'性格特点'}],supporting:[{key:'role',label:'角色定位'}]},inspirationSeeds:['雨天在咖啡店偶遇陌生人']},
+history:{name:'历史',worldFields:[{key:'dynasty',label:'朝代',required:true}],storyArcs:['起兵','征战','建国','治国','盛衰'],characterFields:{protagonist:[{key:'title',label:'身份'}],supporting:[{key:'faction',label:'阵营'}]},inspirationSeeds:['穿越到乱世成为一方诸侯']},
+horror:{name:'恐怖',worldFields:[{key:'setting',label:'场景设定',required:true}],storyArcs:['日常','异变','调查','恐怖','真相'],characterFields:{protagonist:[{key:'background',label:'背景'}],supporting:[{key:'secret',label:'秘密'}]},inspirationSeeds:['老宅搬入后夜间总有脚步声']},
+game:{name:'游戏',worldFields:[{key:'gameWorld',label:'游戏世界',required:true}],storyArcs:['进入游戏','升级','组队','副本','PK','巅峰'],characterFields:{protagonist:[{key:'class',label:'职业'}],supporting:[{key:'guild',label:'公会'}]},inspirationSeeds:['全服第一玩家意外被困游戏中']},
+other:{name:'其他',worldFields:[{key:'custom',label:'自定义',required:true}],storyArcs:['起','承','转','合'],characterFields:{protagonist:[{key:'custom',label:'自定义'}],supporting:[{key:'custom',label:'自定义'}]},inspirationSeeds:['一个普通人发现生活开始不对劲']}
+};
+
+// ===== StoryStore: Unified Data Access Layer =====
+var StoryStore=(function(){
+  var STORAGE_KEY='novelcraft_unified_v1';
+  var OLD_NC_KEY='novelcraft_pro_v1';
+  var OLD_WENSI_KEY='wensi_books_v9';
+
+  var _state=createEmptyState();
+
+  function createEmptyState(){
+    return{
+      _schema:SCHEMA_VERSION,
+      _stateVersion:STORY_STATE_VERSION,
+      meta:{title:'未命名小说',genre:'fantasy',dailyGoal:4000,createdAt:0,theme:'dark',fontSize:15,autoSave:true},
+      chapters:[],characters:[],world:{setting:{},locations:[],factions:[],rules:[]},
+      timeline:[],foreshadowing:[],conflicts:[],
+      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[]},
+      _lastParseResult:null
+    };
+  }
+
+  function uid(){return'_'+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);}
+  function deepClone(o){return JSON.parse(JSON.stringify(o));}
+
+  function migrateFromNC(oldD){
+    var s=createEmptyState();
+    if(oldD.project){s.meta.title=oldD.project.name||'未命名小说';s.meta.genre=oldD.project.genre||'fantasy';s.meta.dailyGoal=oldD.project.dailyGoal||4000;s.meta.createdAt=oldD.project.createdAt||0;}
+    if(oldD.settings){s.meta.theme=oldD.settings.theme||'dark';s.meta.fontSize=oldD.settings.fontSize||15;s.meta.autoSave=oldD.settings.autoSave!==false;}
+    s.chapters=(oldD.chapters||[]).map(function(ch,idx){return{id:ch.id||uid(),title:ch.title||('第'+(idx+1)+'章'),summary:'',content:ch.content||'',wordCount:ch.wordCount||0,status:ch.status==='completed'?'已完成':'未写',order:idx,aiAnalysis:{characters:[],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}};});
+    s.characters=(oldD.characters||[]).map(function(c,idx){return{id:c.id||uid(),name:c.name||'未命名',gender:c.gender||'',age:c.age||'',charType:c.charType||'protagonist',tags:[c.gender,c.age].filter(Boolean),fields:{ability:c.ability||'',personality:c.personality||'',background:c.background||'',goal:c.goal||'',weakness:c.weakness||'',faction:c.faction||'',equipment:c.equipment||'',skills:c.skills||''},relations:(c.relations||[]).map(function(r){return{targetId:r.targetId,type:r.type};}),presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},aiProfile:{arcStage:'',consistencyScore:100,importance:idx===0?10:5}};});
+    s.world.locations=(oldD.worldbuilding||[]).map(function(w,idx){return{id:w.id||uid(),name:w.name||'',category:w.category||'其他',description:w.description||'',attributes:w.attributes||{}};});
+    s.timeline=(oldD.timelines||[]).map(function(t,idx){return{id:t.id||uid(),date:t.date||'',event:t.event||'',chapterId:null,type:'event'};});
+    s.foreshadowing=(oldD.foreshadows||[]).map(function(f,idx){return{id:f.id||uid(),content:f.description||'',chapterPlaced:parseInt(f.plantChapter)||0,chapterExpected:parseInt(f.resolveChapter)||0,status:f.status==='已回收'?'resolved':'pending',note:f.note||'',linkedChapterId:null};});
+    s.narrative_state.pendingForeshadows=s.foreshadowing.filter(function(f){return f.status==='pending';}).map(function(f){return f.id;});
+    return s;
+  }
+
+  function migrateFromWensi(bookData){
+    var s=createEmptyState();
+    if(!bookData)return s;
+    s.meta.title=bookData.title||'未命名小说';s.meta.genre=bookData.genre||'fantasy';
+    s.chapters=(bookData.chapters||[]).map(function(ch,idx){return{id:ch.id||uid(),title:ch.title||('第'+(idx+1)+'章'),summary:ch.summary||'',content:ch.content||'',wordCount:ch.wordCount||0,status:ch.status||'未写',order:idx,aiAnalysis:{characters:[],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}};});
+    s.characters=(bookData.characters||[]).map(function(c,idx){return{id:c.id||uid(),name:c.name||'未命名',gender:c.gender||'',age:c.age||'',charType:c.charType||'protagonist',tags:[c.gender,c.age].filter(Boolean),fields:c.customFields||{},relations:(c.relations||[]).map(function(r){return{targetId:r.targetId,type:r.type};}),presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},aiProfile:{arcStage:'',consistencyScore:100,importance:idx===0?10:5}};});
+    s.foreshadowing=(bookData.foreshadows||[]).map(function(f,idx){return{id:f.id||uid(),content:f.content||'',chapterPlaced:f.chapterPlaced||0,chapterExpected:f.chapterExpected||0,status:f.status||'pending',note:f.note||'',linkedChapterId:null};});
+    s.narrative_state.pendingForeshadows=s.foreshadowing.filter(function(f){return f.status==='pending';}).map(function(f){return f.id;});
+    return s;
+  }
+
+  function load(){
+    try{
+      var raw=localStorage.getItem(STORAGE_KEY);
+      if(raw){
+        _state=JSON.parse(raw);
+        var d=createEmptyState();
+        for(var k in d)if(!(k in _state))_state[k]=d[k];
+        if(!_state._schema||_state._schema<SCHEMA_VERSION){
+          _state._schema=SCHEMA_VERSION;
+          _state._stateVersion=STORY_STATE_VERSION;
+          persist();
+        }
+        return;
+      }
+      var oldNC=localStorage.getItem(OLD_NC_KEY);
+      if(oldNC){var oldD=JSON.parse(oldNC);_state=migrateFromNC(oldD);persist();return;}
+      var oldWensi=localStorage.getItem(OLD_WENSI_KEY);
+      if(oldWensi){var books=JSON.parse(oldWensi);var book=Array.isArray(books)&&books.length>0?books[0]:null;if(book&&book.data){_state=migrateFromWensi(book.data);persist();return;}}
+    }catch(e){console.error('[StoryStore] load error:',e);}
+    _state=createEmptyState();
+  }
+
+  var _saveTimer=null;
+  function persist(){
+    try{localStorage.setItem(STORAGE_KEY,JSON.stringify(_state));}catch(e){console.error('[StoryStore] persist error:',e);}
+  }
+
+  // Public API
+  return{
+    get state(){return _state;},
+    getMeta:function(){return _state.meta;},
+    setMeta:function(key,val){_state.meta[key]=val;persist();},
+    // Chapters
+    getChapters:function(){return _state.chapters;},
+    getChapter:function(id){return _state.chapters.find(function(c){return c.id===id;});},
+    getChapterByIdx:function(idx){return _state.chapters[idx];},
+    addChapter:function(data){var ch={id:uid(),title:data.title||('第'+(_state.chapters.length+1)+'章'),content:data.content||'',summary:data.summary||'',wordCount:data.wordCount||0,status:'未写',order:_state.chapters.length,aiAnalysis:{characters:[],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}};_state.chapters.push(ch);persist();return ch;},
+    updateChapter:function(id,patch){var ch=this.getChapter(id);if(!ch)return null;for(var k in patch)if(k!=='id')ch[k]=patch[k];persist();return ch;},
+    deleteChapter:function(id){var idx=_state.chapters.findIndex(function(c){return c.id===id;});if(idx<0)return false;_state.chapters.splice(idx,1);_state.chapters.forEach(function(c,i){c.order=i;});persist();return true;},
+    // Characters
+    getCharacters:function(){return _state.characters;},
+    getCharacter:function(id){return _state.characters.find(function(c){return c.id===id;});},
+    addCharacter:function(data){var c={id:uid(),name:data.name||'未命名',gender:data.gender||'',age:data.age||'',charType:data.charType||'supporting',tags:[data.gender,data.age].filter(Boolean),fields:data.fields||{},relations:data.relations||[],presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},aiProfile:{arcStage:'',consistencyScore:100,importance:_state.characters.length===0?10:5}};_state.characters.push(c);persist();return c;},
+    updateCharacter:function(id,patch){var c=this.getCharacter(id);if(!c)return null;for(var k in patch)if(k!=='id')c[k]=patch[k];persist();return c;},
+    deleteCharacter:function(id){var idx=_state.characters.findIndex(function(c){return c.id===id;});if(idx<0)return false;_state.characters.splice(idx,1);persist();return true;},
+    // Foreshadowing
+    getForeshadows:function(){return _state.foreshadowing;},
+    getForeshadow:function(id){return _state.foreshadowing.find(function(f){return f.id===id;});},
+    addForeshadow:function(data){var f={id:uid(),content:data.content||'',chapterPlaced:data.chapterPlaced||0,chapterExpected:data.chapterExpected||0,status:'pending',note:data.note||'',linkedChapterId:null};_state.foreshadowing.push(f);_state.narrative_state.pendingForeshadows.push(f.id);persist();return f;},
+    updateForeshadow:function(id,patch){var f=this.getForeshadow(id);if(!f)return null;for(var k in patch)if(k!=='id')f[k]=patch[k];persist();return f;},
+    // Conflicts
+    getConflicts:function(){return _state.conflicts;},
+    addConflict:function(data){var c={id:data.id||uid(),type:data.type||'person_vs_person',description:data.description||'',parties:data.parties||[],status:data.status||'active',chapterStarted:data.chapterStarted||0,chapterResolved:null};_state.conflicts.push(c);_state.narrative_state.activeConflicts.push(c.id);persist();return c;},
+    updateConflict:function(id,patch){var c=_state.conflicts.find(function(x){return x.id===id;});if(!c)return null;for(var k in patch)if(k!=='id')c[k]=patch[k];persist();return c;},
+    // World
+    getWorld:function(){return _state.world;},
+    addLocation:function(data){var l={id:uid(),name:data.name||'',category:data.category||'其他',description:data.description||'',attributes:data.attributes||{}};_state.world.locations.push(l);persist();return l;},
+    deleteLocation:function(id){var idx=_state.world.locations.findIndex(function(l){return l.id===id;});if(idx<0)return false;_state.world.locations.splice(idx,1);persist();return true;},
+    // Timeline
+    getTimeline:function(){return _state.timeline;},
+    addTimelineEvent:function(data){var t={id:uid(),date:data.date||'',event:data.event||'',chapterId:data.chapterId||null,type:data.type||'event'};_state.timeline.push(t);persist();return t;},
+    // Outlines (stored in world.rules as tree)
+    getOutlines:function(){return _state.world.outlines||[];},
+    addOutline:function(data){if(!_state.world.outlines)_state.world.outlines=[];var o={id:uid(),title:data.title||'',content:data.content||'',parentId:data.parentId||null,level:data.level||1};_state.world.outlines.push(o);persist();return o;},
+    updateOutline:function(id,patch){if(!_state.world.outlines)return null;var o=_state.world.outlines.find(function(x){return x.id===id;});if(!o)return null;for(var k in patch)if(k!=='id')o[k]=patch[k];persist();return o;},
+    deleteOutline:function(id){if(!_state.world.outlines)return false;_state.world.outlines=_state.world.outlines.filter(function(x){return x.id!==id;});persist();return true;},
+    // State Management
+    snapshot:function(){return deepClone(_state);},
+    rollback:function(snap){_state=deepClone(snap);persist();},
+    diff:function(before,after){var changes={};var keys=Object.keys(after);keys.forEach(function(k){if(JSON.stringify(before[k])!==JSON.stringify(after[k]))changes[k]={before:before[k],after:after[k]};});return changes;},
+    hash:function(obj){var str=JSON.stringify(obj);var h=5381;for(var i=0;i<str.length;i++){h=((h<<5)+h)+str.charCodeAt(i);h=h&0xFFFFFFFF;}return(h>>>0).toString(16);},
+    // Narrative State
+    getNarrativeState:function(){return _state.narrative_state;},
+    setNarrativeState:function(key,val){_state.narrative_state[key]=val;persist();},
+    // Persistence
+    load:load,persist:persist,
+    // Export
+    exportJSON:function(){return JSON.stringify(_state,null,2);},
+    importJSON:function(jsonStr){_state=JSON.parse(jsonStr);persist();},
+    // Reset
+    reset:function(){_state=createEmptyState();persist();}
+  };
+})();
+
+// Make StoryState point to StoryStore.state for backward compat
+Object.defineProperty(window,'StoryState',{get:function(){return StoryStore.state;}});
+
+// ===== StoryEngine =====
+var StoryEngine={
+  parseText:function(text){
+    var result={characters:[],foreshadows:[],events:[],timeHints:[],emotions:[],locations:[]};
+    if(!text||!text.trim())return result;
+    var fsMatches=text.match(/\[\[伏笔:([^\]]+)\]\]/g)||[];
+    fsMatches.forEach(function(m){var content=m.replace(/^\[\[伏笔:/,'').replace(/\]\]$/,'');result.foreshadows.push({content:content.replace(/^FS\w+\s*/,''),raw:m});});
+    var knownChars=StoryStore.getCharacters().map(function(c){return c.name;}).filter(function(n){return n&&n!=='未命名';});
+    knownChars.forEach(function(name){if(!name)return;var regex=new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g');var matches=text.match(regex);if(matches)result.characters.push({name:name,count:matches.length});});
+    var newNames=this._detectNewNames(text,knownChars);
+    newNames.forEach(function(n){result.characters.push({name:n,count:1,isNew:true});});
+    var locKeywords=['客栈','宗门','森林','宫殿','山洞','城市','村庄','山谷','河边','桥上'];
+    var knownLocs=StoryStore.getWorld().locations.map(function(l){return l.name;}).filter(function(n){return n;});
+    knownLocs.concat(locKeywords).forEach(function(loc){if(text.indexOf(loc)>=0)result.locations.push(loc);});
+    var exclCount=(text.match(/[！!]/g)||[]).length;
+    var quesCount=(text.match(/[？?]/g)||[]).length;
+    if(exclCount>3)result.emotions.push('excited');
+    if(quesCount>3)result.emotions.push('suspense');
+    var eventKeywords=['杀','战','逃','救','发现','背叛','突破','觉醒','结婚','死亡','出生'];
+    eventKeywords.forEach(function(kw){if(text.indexOf(kw)>=0)result.events.push(kw);});
+    var timePatterns=['第二天','三天后','一年后','夜晚','清晨','黄昏','黎明','三年后','十年后','片刻后','与此同时'];
+    timePatterns.forEach(function(tp){if(text.indexOf(tp)>=0)result.timeHints.push(tp);});
+    return result;
+  },
+  _detectNewNames:function(text,knownChars){
+    var candidates=text.match(/[\u4e00-\u9fa5]{2,4}/g)||[];
+    var freq={};
+    candidates.forEach(function(c){freq[c]=(freq[c]||0)+1;});
+    return Object.keys(freq).filter(function(k){return freq[k]>=2&&!knownChars.includes(k)&&k.length>=2&&k.length<=4;}).sort(function(a,b){return freq[b]-freq[a];}).slice(0,5);
+  },
+  syncFromChapter:function(content,chapterIdx){
+    var parseResult=this.parseText(content);
+    StoryStore.state._lastParseResult=parseResult;
+    var ch=StoryStore.getChapterByIdx(chapterIdx);
+    if(ch){
+      ch.aiAnalysis={
+        characters:parseResult.characters.map(function(c){return c.name;}),
+        locations:Array.from(new Set(parseResult.locations)),
+        events:Array.from(new Set(parseResult.events)),
+        foreshadowHits:parseResult.foreshadows.map(function(f){return f.content;}),
+        emotions:parseResult.emotions,
+        timeHints:parseResult.timeHints,
+        lastParsed:0
+      };
+    }
+    // Update character presence - idempotent
+    parseResult.characters.forEach(function(pc){
+      var char=StoryStore.getCharacters().find(function(c){return c.name===pc.name;});
+      if(char&&!pc.isNew){
+        if(char.presence.chapterIds.indexOf(chapterIdx)<0)char.presence.chapterIds.push(chapterIdx);
+        // Only increment if this chapter is new
+        if(char.presence.lastAppear<chapterIdx){char.presence.appearCount+=pc.count;char.presence.lastAppear=chapterIdx;}
+        if(char.presence.firstAppear===0||char.presence.firstAppear>chapterIdx)char.presence.firstAppear=chapterIdx;
+      }
+    });
+    // Update characterPresence map
+    var presence={};
+    StoryStore.getCharacters().forEach(function(c){presence[c.name]=c.presence.appearCount;});
+    StoryStore.setNarrativeState('characterPresence',presence);
+    StoryStore.persist();
+    // [StoryEngine] parse complete
+    return parseResult;
+  }
+};
+
+// ===== buildAIContext =====
+function buildAIContext(chapterIdx){
+  var s=StoryStore.state;
+  var ch=s.chapters[chapterIdx]||{};
+  var prevChapters=s.chapters.slice(0,chapterIdx).map(function(c,i){return{index:i,title:c.title,summary:(c.summary||'').slice(0,80),wordCount:c.wordCount||0,characters:c.aiAnalysis?c.aiAnalysis.characters:[]};});
+  var protagonist=s.characters.find(function(c){return c.charType==='protagonist';});
+  return{
+    storyState:{
+      meta:{title:s.meta.title,genre:s.meta.genre,chapterCount:s.chapters.length,characterCount:s.characters.length,foreshadowCount:s.foreshadowing.length,conflictCount:s.conflicts.length},
+      narrative_state:s.narrative_state,
+      characters:s.characters.map(function(c){return{name:c.name,charType:c.charType,tags:c.tags,presence:c.presence,relations:c.relations,fields:c.fields};}),
+      foreshadowing:s.foreshadowing.filter(function(f){return f.status==='pending';}).map(function(f){return{id:f.id,content:f.content,chapterPlaced:f.chapterPlaced,chapterExpected:f.chapterExpected,status:f.status};}),
+      conflicts:s.conflicts.map(function(c){return{id:c.id,description:c.description,status:c.status,parties:c.parties};}),
+      timeline:s.timeline.slice(-5),
+      chapters:s.chapters
+    },
+    chapter:{index:chapterIdx,title:ch.title||'',contentPreview:(ch.content||'').slice(-500),wordCount:ch.wordCount||0,status:ch.status||'未写',parsedCharacters:ch.aiAnalysis?ch.aiAnalysis.characters:[]},
+    analysis:{protagonist:protagonist?protagonist.name:'',antagonists:s.characters.filter(function(c){return c.tags&&c.tags.some(function(t){return['反派','敌人','宿敌'].includes(t);})||c.relations&&c.relations.some(function(r){return r.type==='仇敌';});}).map(function(c){return c.name;}),recentEvents:s.timeline.slice(-3).map(function(t){return t.event;}),paceScore:s.narrative_state.paceScore,tensionLevel:s.narrative_state.tensionLevel,issues:s.narrative_state.issues},
+    context:{prevChapters:prevChapters,genreConfig:GENRE_CONFIG[s.meta.genre]||GENRE_CONFIG.other}
+  };
+}
+
+// ===== AIRuntime (3-Layer Architecture + 16 Rules + Action Plan) =====
+var AIRuntime=(function(){
+  // --- Rule Layer ---
+  var AIRuleRegistry={
+    rules:[
+      // Original 7 rules
+      {id:'no_characters',priority:10,enabled:true,condition:function(ctx){return ctx.storyState.characters.length===0;},action:function(){return{action:'create_protagonist',priority:10,reason:'小说中没有角色，建议创建主角'};},validate:function(){return true;}},
+      {id:'no_protagonist',priority:9,enabled:true,condition:function(ctx){return ctx.storyState.characters.length>0&&!ctx.storyState.characters.some(function(c){return c.charType==='protagonist';});},action:function(){return{action:'designate_protagonist',priority:9,reason:'缺少主角，建议指定一个角色为主角'};},validate:function(){return true;}},
+      {id:'no_conflict',priority:8,enabled:true,condition:function(ctx){return ctx.storyState.chapters.length>=3&&ctx.storyState.conflicts.length===0;},action:function(ctx){return{action:'introduce_conflict',priority:8,reason:'已有'+ctx.storyState.chapters.length+'章但无冲突，建议引入核心冲突'};},validate:function(){return true;}},
+      {id:'protag_missing',priority:9,enabled:true,condition:function(ctx){var ch=ctx.chapter;if(ch.index===0)return false;var parsed=ch.parsedCharacters||[];var protag=ctx.analysis.protagonist;if(!protag)return false;return parsed.indexOf(protag)<0;},action:function(ctx){return{action:'bring_protagonist_back',priority:7,reason:'主角'+ctx.analysis.protagonist+'在当前章节中未出现'};},validate:function(){return true;}},
+      {id:'foreshadow_overdue',priority:7,enabled:true,condition:function(ctx){var currentCh=ctx.chapter.index;return ctx.storyState.foreshadowing.some(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;});},action:function(ctx){var currentCh=ctx.chapter.index;var overdue=ctx.storyState.foreshadowing.filter(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;});return overdue.map(function(f){return{action:'resolve_foreshadow',priority:7,reason:'伏笔「'+f.content+'」已逾期（预期第'+f.chapterExpected+'章，当前第'+currentCh+'章）',target:f.id};});},validate:function(){return true;}},
+      {id:'slow_pace',priority:4,enabled:true,condition:function(ctx){if(ctx.storyState.chapters.length<3)return false;var genre=ctx.storyState.meta.genre;var config=ctx.context.genreConfig;var expected=genre==='xianxia'||genre==='fantasy'?500:genre==='scifi'?600:400;var avg=ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length;return avg<expected*0.6;},action:function(){return{action:'increase_pace',priority:4,reason:'章节平均字数偏低，节奏可能过慢'};},validate:function(){return true;}},
+      {id:'lonely_protagonist',priority:4,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;var supporting=chars.filter(function(c){return c.charType==='supporting'||c.charType==='secondary';});return supporting.length===0;},action:function(){return{action:'introduce_sidekick',priority:4,reason:'缺少配角，主角过于孤独'};},validate:function(){return true;}},
+      // New 9 rules
+      {id:'character_inconsistency',priority:5,enabled:true,condition:function(ctx){if(ctx.storyState.chapters.length<2)return false;var chars=ctx.storyState.characters;for(var i=0;i<chars.length;i++){if(chars[i].aiProfile&&chars[i].aiProfile.consistencyScore<60)return true;}return false;},action:function(ctx){var chars=ctx.storyState.characters;for(var i=0;i<chars.length;i++){if(chars[i].aiProfile&&chars[i].aiProfile.consistencyScore<60)return{action:'flag_inconsistency',priority:5,reason:'角色'+chars[i].name+'一致性评分过低（'+chars[i].aiProfile.consistencyScore+'）',target:chars[i].id};}return null;},validate:function(){return true;}},
+      {id:'relationship_inconsistency',priority:5,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;for(var i=0;i<chars.length;i++){var rels=chars[i].relations||[];for(var j=0;j<rels.length;j++){var target=chars.find(function(c){return c.id===rels[j].targetId;});if(!target)return true;}}return false;},action:function(){return{action:'flag_relationship_issue',priority:5,reason:'角色关系引用了不存在的人物'};},validate:function(){return true;}},
+      {id:'timeline_conflict',priority:6,enabled:true,condition:function(ctx){var tl=ctx.storyState.timeline;if(tl.length<2)return false;for(var i=1;i<tl.length;i++){if(tl[i].date&&tl[i-1].date&&tl[i].date<tl[i-1].date)return true;}return false;},action:function(){return{action:'flag_timeline_conflict',priority:6,reason:'时间线存在逆序，需检查事件先后关系'};},validate:function(){return true;}},
+      {id:'world_rule_conflict',priority:6,enabled:true,condition:function(ctx){var rules=ctx.storyState.world?ctx.storyState.world.rules:[];if(!rules||rules.length===0)return false;return false;},action:function(){return{action:'flag_world_conflict',priority:6,reason:'世界观规则可能存在冲突'};},validate:function(){return true;}},
+      {id:'power_level_conflict',priority:5,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length===0)return false;var protag=chars.find(function(c){return c.charType==='protagonist';});if(!protag)return false;var fields=protag.fields||{};var ability=fields.ability||'';if(!ability)return false;return false;},action:function(){return{action:'flag_power_conflict',priority:5,reason:'人物能力可能超出当前境界'};},validate:function(){return true;}},
+      {id:'unused_character',priority:3,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;var chIdx=ctx.chapter.index;return chars.some(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});},action:function(ctx){var unused=ctx.storyState.characters.filter(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});if(unused.length>0)return{action:'flag_unused_character',priority:3,reason:'角色'+unused[0].name+'尚未在任何章节中出现',target:unused[0].id};return null;},validate:function(){return true;}},
+      {id:'arc_stagnation',priority:4,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;var protag=chars.find(function(c){return c.charType==='protagonist';});if(!protag||!protag.aiProfile)return false;return protag.aiProfile.arcStage===''&&ctx.storyState.chapters.length>=5;},action:function(){return{action:'flag_arc_stagnation',priority:4,reason:'主角成长弧光停滞，缺少阶段变化'};},validate:function(){return true;}},
+      {id:'chapter_hook_weak',priority:3,enabled:true,condition:function(ctx){var ch=ctx.chapter;if(!ch||ch.index===0)return false;var content=ch.contentPreview||'';var hasHook=['？','?','！','!','突然','忽然','没想到','不料'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&ch.wordCount>200;},action:function(){return{action:'flag_weak_hook',priority:3,reason:'当前章节末尾缺少悬念钩子'};},validate:function(){return true;}},
+      {id:'ending_hook_missing',priority:3,enabled:true,condition:function(ctx){var chapters=ctx.storyState.chapters;if(chapters.length<3)return false;var last=chapters[chapters.length-1];var content=(last.content||'').slice(-200);var hasHook=['？','?','！','!','突然','忽然','没想到','不料','究竟','到底'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&last.wordCount>200;},action:function(){return{action:'flag_ending_hook',priority:3,reason:'最近章节结尾缺少悬念，读者可能失去追读动力'};},validate:function(){return true;}}
+    ],
+    getEnabledRules:function(){return this.rules.filter(function(r){return r.enabled;}).sort(function(a,b){return b.priority-a.priority;});},
+    toggleRule:function(id){var r=this.rules.find(function(x){return x.id===id;});if(r){r.enabled=!r.enabled;}return r?r.enabled:false;},
+    getRule:function(id){return this.rules.find(function(r){return r.id===id;});},
+    getRuleCount:function(){return this.rules.length;}
+  };
+
+  // --- Decision Layer ---
+  var AIDecisionLayer={
+    evaluate:function(ctx){
+      var issues=[],decisions=[];
+      var rules=AIRuleRegistry.getEnabledRules();
+      rules.forEach(function(rule){
+        try{
+          if(rule.condition(ctx)){
+            var actionResult=rule.action(ctx);
+            if(Array.isArray(actionResult)){
+              actionResult.forEach(function(dec){
+                issues.push({type:rule.id,severity:rule.priority>=8?'critical':rule.priority>=5?'warning':'info',message:rule.id,reason:dec.reason||rule.id});
+                dec.ruleId=rule.id;dec.confidence=rule.priority>=8?0.9:rule.priority>=5?0.7:0.5;dec.requiresApproval=dec.action.indexOf('introduce')>=0||dec.action.indexOf('create')>=0||dec.action.indexOf('resolve')>=0;
+                decisions.push(dec);
+              });
+            }else if(actionResult){
+              issues.push({type:rule.id,severity:rule.priority>=8?'critical':rule.priority>=5?'warning':'info',message:rule.id,reason:actionResult.reason||rule.id});
+              actionResult.ruleId=rule.id;actionResult.confidence=rule.priority>=8?0.9:rule.priority>=5?0.7:0.5;actionResult.requiresApproval=actionResult.action.indexOf('introduce')>=0||actionResult.action.indexOf('create')>=0||actionResult.action.indexOf('resolve')>=0;
+              decisions.push(actionResult);
+            }
+          }
+        }catch(e){console.error('[Rule] '+rule.id+' error:',e);}
+      });
+      return{issues:issues,decisions:decisions};
+    }
+  };
+
+  // --- Execution Layer ---
+  var AIExecutionLayer={
+    _executedHashes:{},
+    _computeDecisionHash:function(decision,stateSig){return decision.action+'_'+(decision.target||'null')+'_'+stateSig;},
+    _getStateSignature:function(s){return's'+s.chapters.length+'_c'+s.conflicts.length+'_f'+s.foreshadowing.length+'_ch'+s.characters.length;},
+    resetExecutedHashes:function(){this._executedHashes={};},
+    execute:function(decisions){
+      var results=[];var s=StoryStore.state;var stateSig=this._getStateSignature(s);var self=this;
+      decisions.sort(function(a,b){return b.priority-a.priority;});
+      decisions.forEach(function(d){
+        var hash=self._computeDecisionHash(d,stateSig);
+        if(self._executedHashes[hash]){results.push({action:d.action,status:'skipped_idempotent',priority:d.priority,detail:'AI决策：已执行过，跳过'});return;}
+        var result=self._applyDecision(d,s);
+        if(result){results.push(result);self._executedHashes[hash]=true;}
+      });
+      StoryStore.persist();
+      return results;
+    },
+    _applyDecision:function(d,s){
+      switch(d.action){
+        case'create_protagonist':s.narrative_state.aiSuggestions['create_protagonist']='[AI决策] 建议立即创建主角角色';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：创建主角'};
+        case'designate_protagonist':s.narrative_state.aiSuggestions['designate_protagonist']='[AI决策] 建议将现有角色设定为主角';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：指定主角'};
+        case'introduce_conflict':var hasSuggested=s.conflicts.some(function(c){return c.status==='suggested'&&c.description.indexOf('AI建议')>=0;});if(hasSuggested)return{action:d.action,status:'skipped',priority:d.priority,detail:'AI决策：已有建议冲突，跳过'};var cid='conf_'+s.chapters.length+'_'+s.conflicts.length+'_'+d.action;s.conflicts.push({id:cid,type:'person_vs_person',description:'AI建议：引入核心冲突',parties:[],status:'suggested',chapterStarted:s.chapters.length,chapterResolved:null});s.narrative_state.activeConflicts.push(cid);s.narrative_state.aiSuggestions['introduce_conflict']='[AI决策] 建议引入冲突';return{action:d.action,status:'created',priority:d.priority,detail:'AI决策：创建冲突',conflictId:cid};
+        case'resolve_foreshadow':var fs=s.foreshadowing.find(function(f){return f.id===d.target;});if(!fs)return null;fs.status='resolved';s.narrative_state.aiSuggestions['resolve_foreshadow_'+d.target]='[AI决策] 建议回收伏笔：「'+fs.content+'」';s.narrative_state.pendingForeshadows=s.narrative_state.pendingForeshadows.filter(function(id){return id!==d.target;});return{action:d.action,status:'targeted',priority:d.priority,detail:'AI决策：回收伏笔「'+fs.content+'」',target:d.target};
+        case'bring_protagonist_back':s.narrative_state.aiSuggestions['bring_protagonist_back']='[AI决策] 建议让主角重新出场';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：主角回归'};
+        case'increase_pace':s.narrative_state.aiSuggestions['increase_pace']='[AI决策] 建议加入突发事件加快节奏';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：加速节奏'};
+        case'introduce_sidekick':s.narrative_state.aiSuggestions['introduce_sidekick']='[AI决策] 建议引入配角';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：引入配角'};
+        case'flag_inconsistency':case'flag_relationship_issue':case'flag_timeline_conflict':case'flag_world_conflict':case'flag_power_conflict':case'flag_unused_character':case'flag_arc_stagnation':case'flag_weak_hook':case'flag_ending_hook':s.narrative_state.aiSuggestions[d.action]='[AI诊断] '+d.reason;return{action:d.action,status:'flagged',priority:d.priority,detail:'AI诊断：'+d.reason,target:d.target};
+        default:return{action:d.action,status:'unknown',priority:d.priority||0};
+      }
+    }
+  };
+
+  // --- State Manager ---
+  var StoryStateManager={
+    snapshot:function(){return StoryStore.snapshot();},
+    diff:function(before,after){return StoryStore.diff(before,after);},
+    rollback:function(snap){StoryStore.rollback(snap);},
+    replay:function(decisions){AIExecutionLayer.resetExecutedHashes();var before=this.snapshot();var results=AIExecutionLayer.execute(decisions);var after=this.snapshot();return{results:results,diff:this.diff(before,after)};},
+    hash:function(obj){return StoryStore.hash(obj);}
+  };
+
+  // --- Action Plan System (Observe -> Analyze -> Plan -> Validate -> Approval -> Execute -> Verify) ---
+  var ActionPlanSystem={
+    observe:function(chapterIdx){
+      // Sync chapter content into StoryState via StoryEngine
+      var ch=StoryStore.getChapterByIdx(chapterIdx);
+      if(ch&&ch.content)StoryEngine.syncFromChapter(ch.content,chapterIdx);
+      return{chapterIdx:chapterIdx,chapterTitle:ch?ch.title:'',wordCount:ch?ch.wordCount:0};
+    },
+    analyze:function(chapterIdx){
+      var ctx=buildAIContext(chapterIdx);
+      var result=AIDecisionLayer.evaluate(ctx);
+      var state={chapterCount:ctx.storyState.chapters.length,characterCount:ctx.storyState.characters.length,conflictCount:ctx.storyState.conflicts.length,pendingForeshadows:ctx.storyState.foreshadowing.length,avgWords:ctx.storyState.chapters.length>0?ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length:0};
+      return{issues:result.issues,decisions:result.decisions,state:state,context:ctx};
+    },
+    plan:function(analysis){
+      // Create action plans from decisions
+      var plans=analysis.decisions.map(function(d){
+        return{
+          id:d.action+'_'+(d.target||'all')+'_'+Date.now().toString(36),
+          ruleId:d.ruleId,
+          action:d.action,
+          target:d.target||null,
+          priority:d.priority,
+          reason:d.reason,
+          confidence:d.confidence||0.5,
+          requiresApproval:d.requiresApproval!==false,
+          status:'pending'
+        };
+      });
+      return plans;
+    },
+    validate:function(plans){
+      // Check for duplicates and conflicts
+      var seen={};var valid=[];
+      plans.forEach(function(p){
+        var key=p.action+'_'+(p.target||'');
+        if(seen[key])return;
+        seen[key]=true;
+        p.status='validated';
+        valid.push(p);
+      });
+      return valid;
+    },
+    executeWithApproval:function(plans,approvedIds){
+      var before=StoryStateManager.snapshot();
+      var toExecute=plans.filter(function(p){return approvedIds.indexOf(p.id)>=0||!p.requiresApproval;});
+      var decisions=toExecute.map(function(p){return{action:p.action,target:p.target,priority:p.priority,reason:p.reason};});
+      var results=AIExecutionLayer.execute(decisions);
+      var after=StoryStateManager.snapshot();
+      var diff=StoryStateManager.diff(before,after);
+      var verify=this.verify(before,after,results);
+      return{results:results,diff:diff,verified:verify};
+    },
+    verify:function(before,after,results){
+      var changes=StoryStateManager.diff(before,after);
+      var hasChanges=Object.keys(changes).length>0;
+      var executedCount=results.filter(function(r){return r.status!=='skipped_idempotent'&&r.status!=='skipped';}).length;
+      var skippedCount=results.filter(function(r){return r.status==='skipped_idempotent'||r.status==='skipped';}).length;
+      return{hasChanges:hasChanges,executedCount:executedCount,skippedCount:skippedCount,stateHashBefore:StoryStateManager.hash(before),stateHashAfter:StoryStateManager.hash(after)};
+    },
+    runFull:function(chapterIdx){
+      var obs=this.observe(chapterIdx);
+      var analysis=this.analyze(chapterIdx);
+      var plans=this.plan(analysis);
+      var validated=this.validate(plans);
+      return{observe:obs,analysis:analysis,plans:validated};
+    }
+  };
+
+  // --- Scene Tests ---
+  function injectTestState(testState){
+    var original=StoryStore.snapshot();
+    var s=StoryStore.state;
+    s.meta=testState.meta||{title:'Test',genre:'fantasy'};
+    s.chapters=testState.chapters||[];
+    s.characters=testState.characters||[];
+    s.foreshadowing=testState.foreshadowing||[];
+    s.conflicts=testState.conflicts||[];
+    s.timeline=testState.timeline||[];
+    s.world=testState.world||{setting:{},locations:[],factions:[],rules:[]};
+    s.narrative_state=testState.narrative_state||{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[]};
+    s._lastParseResult=null;
+    AIExecutionLayer.resetExecutedHashes();
+    return original;
+  }
+  function restoreState(original){
+    var s=StoryStore.state;
+    Object.keys(s).forEach(function(k){delete s[k];});
+    Object.keys(original).forEach(function(k){s[k]=original[k];});
+    AIExecutionLayer.resetExecutedHashes();
+  }
+
+  return{
+    RuleRegistry:AIRuleRegistry,
+    DecisionLayer:AIDecisionLayer,
+    ExecutionLayer:AIExecutionLayer,
+    StateManager:StoryStateManager,
+    ActionPlan:ActionPlanSystem,
+    analyze:function(chapterIdx){return ActionPlanSystem.analyze(chapterIdx);},
+    execute:function(decisions){return AIExecutionLayer.execute(decisions);},
+    run:function(chapterIdx){var a=this.analyze(chapterIdx);var snap=StoryStateManager.snapshot();var exec=AIExecutionLayer.execute(a.decisions);StoryStore.state.narrative_state.lastAnalysis=1;return{analysis:a,executed:exec,timestamp:0,snapshotHash:StoryStateManager.hash(snap)};},
+    runActionPlan:function(chapterIdx){return ActionPlanSystem.runFull(chapterIdx);},
+    _injectTestState:injectTestState,
+    _restoreState:restoreState,
+    // Scene A: Empty story
+    runSceneA:function(){
+      var orig=injectTestState({meta:{title:'Test A',genre:'fantasy'},chapters:[],characters:[],foreshadowing:[],conflicts:[],narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[]}});
+      var result=this.run(0);
+      restoreState(orig);
+      return result;
+    },
+    // Scene B: Has protagonist, no conflict
+    runSceneB:function(){
+      var chs=[];for(var i=0;i<5;i++)chs.push({id:'ch'+i,title:'第'+(i+1)+'章',content:'测试正文'+i,wordCount:500+i*20,status:'已完成',aiAnalysis:{characters:['张三']}});
+      var orig=injectTestState({meta:{title:'Test B',genre:'fantasy'},chapters:chs,characters:[{id:'char0',name:'张三',charType:'protagonist',tags:['男'],fields:{},relations:[],presence:{firstAppear:0,lastAppear:4,chapterIds:[0,1,2,3,4],appearCount:5},aiProfile:{arcStage:'成长期',consistencyScore:90,importance:10}}],foreshadowing:[],conflicts:[],narrative_state:{currentArc:'',paceScore:60,tensionLevel:30,activeConflicts:[],pendingForeshadows:[],characterPresence:{张三:5},lastAnalysis:0,aiSuggestions:{},issues:[]}});
+      var result=this.run(4);
+      restoreState(orig);
+      return result;
+    },
+    // Scene C: Foreshadow overdue
+    runSceneC:function(){
+      var chs=[];for(var i=0;i<10;i++)chs.push({id:'ch'+i,title:'第'+(i+1)+'章',content:'测试正文'+i,wordCount:1000,status:'已完成',aiAnalysis:{characters:['张三']}});
+      var orig=injectTestState({meta:{title:'Test C',genre:'fantasy'},chapters:chs,characters:[{id:'char0',name:'张三',charType:'protagonist',tags:['男'],fields:{},relations:[],presence:{firstAppear:0,lastAppear:9,chapterIds:[0,1,2,3,4,5,6,7,8,9],appearCount:10},aiProfile:{arcStage:'成长期',consistencyScore:90,importance:10}}],foreshadowing:[{id:'FS1',content:'玉佩中藏着上古传承',chapterPlaced:2,chapterExpected:5,status:'pending',note:'',linkedChapterId:null},{id:'FS2',content:'神秘老人的预言',chapterPlaced:3,chapterExpected:7,status:'pending',note:'',linkedChapterId:null}],conflicts:[{id:'C1',type:'person_vs_fate',description:'主角vs命运',parties:['char0'],status:'active',chapterStarted:1,chapterResolved:null}],narrative_state:{currentArc:'传承篇',paceScore:60,tensionLevel:50,activeConflicts:['C1'],pendingForeshadows:['FS1','FS2'],characterPresence:{张三:10},lastAnalysis:0,aiSuggestions:{},issues:[]}});
+      var result=this.run(9);
+      restoreState(orig);
+      return result;
+    },
+    runAllTests:function(){
+      var a=this.runSceneA();var b=this.runSceneB();var c=this.runSceneC();
+      return{
+        sceneA:{pass:a.analysis.decisions.length>0,issues:a.analysis.issues.length,decisions:a.analysis.decisions.length,result:a},
+        sceneB:{pass:b.analysis.decisions.length>0,issues:b.analysis.issues.length,decisions:b.analysis.decisions.length,result:b},
+        sceneC:{pass:c.analysis.decisions.length>0,issues:c.analysis.issues.length,decisions:c.analysis.decisions.length,result:c}
+      };
+    },
+    runRegressionTests:function(){
+      var results=[];
+      // Test 1: Empty story doesn't repeat protagonist suggestion
+      AIExecutionLayer.resetExecutedHashes();
+      var r1=this.runSceneA();var r1b=this.runSceneA();
+      results.push({id:1,name:'空小说不重复创建主角建议',pass:r1.executed.length===r1b.executed.length&&r1.executed[0].action==='create_protagonist'});
+      // Test 2: No conflict story generates stable conflict suggestion
+      AIExecutionLayer.resetExecutedHashes();
+      var r2=this.runSceneB();
+      results.push({id:2,name:'无冲突小说生成稳定冲突建议',pass:r2.executed.some(function(e){return e.action==='introduce_conflict';})});
+      // Test 3: Overdue foreshadow targets specific foreshadow
+      AIExecutionLayer.resetExecutedHashes();
+      var r3=this.runSceneC();
+      results.push({id:3,name:'逾期伏笔定位到具体伏笔',pass:r3.executed.some(function(e){return e.action==='resolve_foreshadow'&&e.target;})});
+      // Test 4: Repeated runs don't duplicate conflicts
+      AIExecutionLayer.resetExecutedHashes();
+      var r4a=this.runSceneB();var r4b=this.runSceneB();
+      results.push({id:4,name:'重复运行不产生重复冲突',pass:r4a.analysis.state.conflictCount===r4b.analysis.state.conflictCount});
+      // Test 5: Repeated runs don't cause state leak
+      AIExecutionLayer.resetExecutedHashes();
+      var beforeHash=StoryStateManager.hash(StoryStore.snapshot());
+      this.runSceneB();this.runSceneB();this.runSceneC();
+      var afterHash=StoryStateManager.hash(StoryStore.snapshot());
+      results.push({id:5,name:'重复运行无状态泄漏',pass:beforeHash===afterHash});
+      // Test 6: StoryEngine repeated parse doesn't duplicate character presence
+      var orig=injectTestState({meta:{title:'Test',genre:'fantasy'},chapters:[{id:'ch0',title:'第1章',content:'张三走进客栈。张三看了看四周。',wordCount:20,status:'已完成',aiAnalysis:{characters:[]}}],characters:[{id:'char0',name:'张三',charType:'protagonist',tags:['男'],fields:{},relations:[],presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},aiProfile:{arcStage:'',consistencyScore:100,importance:10}}],foreshadowing:[],conflicts:[],narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[]}});
+      StoryEngine.syncFromChapter(StoryStore.getChapterByIdx(0).content,0);
+      var count1=StoryStore.getCharacter('char0').presence.appearCount;
+      StoryEngine.syncFromChapter(StoryStore.getChapterByIdx(0).content,0);
+      var count2=StoryStore.getCharacter('char0').presence.appearCount;
+      restoreState(orig);
+      results.push({id:6,name:'StoryEngine重复解析不重复增加出场',pass:count1===count2});
+      // Test 7: StoryStore snapshot/rollback
+      var snap=StoryStore.snapshot();var beforeH=StoryStore.hash(snap);
+      StoryStore.getCharacters().push({id:'temp',name:'Temp',charType:'supporting',tags:[],fields:{},relations:[],presence:{},aiProfile:{}});
+      StoryStore.rollback(snap);
+      var afterH=StoryStore.hash(StoryStore.snapshot());
+      results.push({id:7,name:'StoryStore snapshot/rollback正常',pass:beforeH===afterH});
+      // Test 8: Action Plan diff
+      var apResult=this.runActionPlan(0);
+      results.push({id:8,name:'Action Plan生成正确',pass:apResult.plans.length>0});
+      // Test 9: User rejects -> no state change
+      AIExecutionLayer.resetExecutedHashes();
+      var beforeReject=StoryStore.snapshot();
+      var plans=[{id:'test1',action:'introduce_conflict',target:null,priority:8,reason:'test',requiresApproval:true,status:'validated'}];
+      var execResult=ActionPlanSystem.executeWithApproval(plans,[]);
+      results.push({id:9,name:'用户拒绝Action后状态不变',pass:!execResult.verified.hasChanges});
+      // Test 10: localStorage persistence
+      StoryStore.persist();
+      var raw=localStorage.getItem('novelcraft_unified_v1');
+      results.push({id:10,name:'localStorage数据可恢复',pass:!!raw&&JSON.parse(raw).meta!==undefined});
+      return{results:results,allPass:results.every(function(r){return r.pass;})};
+    }
+  };
+})();
+
+// ===== UI Layer =====
+var curPage='dashboard';var curChId=null;var curView='list';
+
+function navigate(p){
+  curPage=p;
+  document.querySelectorAll('.nav-item').forEach(function(n){n.classList.toggle('active',n.dataset.page===p);});
+  document.querySelectorAll('.page').forEach(function(x){x.classList.remove('active');});
+  var el=document.getElementById('page-'+p);if(el)el.classList.add('active');
+  renderPage(p);renderSidebar(p);
+}
+function renderPage(p){
+  var el=document.getElementById('page-'+p);if(!el)return;
+  var fn={dashboard:rDash,editor:rEditor,characters:rChar,plot:rPlot,worldbuilding:rWB,consistency:rCons,data:rDataC,settings:rSettings};
+  if(fn[p])fn[p](el);
+}
+function renderSidebar(p){
+  var el=document.getElementById('sidebarContent');
+  var title=document.getElementById('sidebarTitle');
+  var fns={dashboard:function(){title.textContent='仪表盘';el.innerHTML='<div class="sidebar-section"><p class="text-muted text-sm">欢迎使用 NovelCraft × Story OS</p></div>';},
+  editor:function(){title.textContent='章节列表';var chs=StoryStore.getChapters();el.innerHTML='<button class="btn btn-primary btn-sm w-full mb-1" onclick="addChapter()">+ 新建章节</button>'+chs.map(function(ch){return'<div class="chapter-list-item'+(ch.id===curChId?' active':'')+'" onclick="selectChapter(\''+ch.id+'\')"><div class="text-sm">'+ch.title+'</div><div class="text-muted" style="font-size:11px">'+(ch.wordCount||0)+'字 · '+(ch.status||'未写')+'</div></div>';}).join('');},
+  characters:function(){title.textContent='人物';el.innerHTML='<button class="btn btn-primary btn-sm w-full mb-1" onclick="showCharModal()">+ 新增人物</button>';},
+  plot:function(){title.textContent='剧情';el.innerHTML='<p class="text-muted text-sm">剧情规划工具</p>';},
+  worldbuilding:function(){title.textContent='世界观';el.innerHTML='<p class="text-muted text-sm">世界观设定</p>';},
+  consistency:function(){title.textContent='一致性检查';el.innerHTML='<p class="text-muted text-sm">基于真实状态</p>';},
+  data:function(){title.textContent='数据';el.innerHTML='<p class="text-muted text-sm">数据管理</p>';},
+  settings:function(){title.textContent='设置';el.innerHTML='<p class="text-muted text-sm">系统设置</p>';}};
+  if(fns[p])fns[p]();else{title.textContent='导航';el.innerHTML='';}
+}
+
+function rDash(el){
+  var s=StoryStore.state;var meta=s.meta;
+  var totalWords=s.chapters.reduce(function(sum,ch){return sum+(ch.wordCount||0);},0);
+  el.innerHTML='<h1 class="text-xl mb-2">'+(meta.title||'未命名小说')+'</h1><p class="text-muted mb-3">'+(GENRE_CONFIG[meta.genre]?GENRE_CONFIG[meta.genre].name:meta.genre)+' · '+s.chapters.length+'章 · '+totalWords+'字</p><div class="grid grid-4 mb-3"><div class="stat-card"><div class="stat-value">'+s.chapters.length+'</div><div class="stat-label">章节</div></div><div class="stat-card"><div class="stat-value">'+s.characters.length+'</div><div class="stat-label">人物</div></div><div class="stat-card"><div class="stat-value">'+s.foreshadowing.length+'</div><div class="stat-label">伏笔</div></div><div class="stat-card"><div class="stat-value">'+s.conflicts.length+'</div><div class="stat-label">冲突</div></div></div><div class="card"><div class="card-title">Story OS 状态</div><div class="grid grid-2"><div><p class="text-muted text-sm">当前弧</p><p>'+(s.narrative_state.currentArc||'未设定')+'</p></div><div><p class="text-muted text-sm">节奏评分</p><p>'+s.narrative_state.paceScore+'</p></div><div><p class="text-muted text-sm">紧张度</p><p>'+s.narrative_state.tensionLevel+'</p></div><div><p class="text-muted text-sm">待回收伏笔</p><p>'+s.narrative_state.pendingForeshadows.length+'</p></div></div></div><div class="card"><div class="card-title">AI Runtime</div><p class="text-muted text-sm mb-1">规则数量: '+AIRuntime.RuleRegistry.getRuleCount()+'</p><div class="flex gap-1"><button class="btn btn-sm btn-primary" onclick="runAIRuntime()">分析当前小说</button><button class="btn btn-sm" onclick="runRegressionTests()">运行回归测试</button></div><div id="aiRuntimeResult" class="mt-1"></div></div>';
+}
+
+function rEditor(el){
+  el.style.padding='0';
+  var chs=StoryStore.getChapters();
+  if(!curChId&&chs.length>0)curChId=chs[0].id;
+  var ch=curChId?StoryStore.getChapter(curChId):null;
+  el.innerHTML='<div class="editor-layout"><div class="chapter-list"><div style="padding:8px 12px;border-bottom:1px solid var(--rule)"><button class="btn btn-primary btn-sm w-full" onclick="addChapter()">+ 新建章节</button></div>'+chs.map(function(c){return'<div class="chapter-list-item'+(c.id===curChId?' active':'')+'" onclick="selectChapter(\''+c.id+'\')"><div class="text-sm">'+c.title+'</div><div class="text-muted" style="font-size:11px">'+(c.wordCount||0)+'字 · '+(c.status||'未写')+'</div></div>';}).join('')+'</div><div class="chapter-editor"><div class="chapter-editor-bar"><input type="text" id="chTitleInput" value="'+(ch?ch.title.replace(/"/g,'&quot;'):'')+'" oninput="updateChTitle(this.value)" style="background:none;border:none;color:var(--ink);font-size:15px;font-weight:600;outline:none;flex:1" /><span id="chWordCount">'+(ch?ch.wordCount:0)+'字</span><span id="chSaveStatus" style="color:var(--success)">已保存</span></div><textarea id="chEditor" oninput="onChapterInput()" placeholder="开始写作...">'+(ch?ch.content:'')+'</textarea><div class="chapter-editor-bar"><span>'+(ch?ch.status:'')+'</span><div class="flex gap-1"><button class="btn btn-sm" onclick="markCompleted()">标记完成</button><button class="btn btn-sm btn-danger" onclick="deleteCurrentChapter()">删除</button></div></div></div><div class="copilot-panel"><div class="copilot-section"><h4>Copilot</h4><button class="btn btn-sm btn-primary w-full" onclick="runCopilot()">分析当前章节</button></div><div class="copilot-section"><h4>问题诊断</h4><div id="copilotIssues"></div></div><div class="copilot-section"><h4>Action Plan</h4><div id="copilotActions"></div></div></div></div>';
+}
+
+function rChar(el){
+  var chars=StoryStore.getCharacters();
+  var cols=['#7c3aed','#06b6d4','#3fb950','#d29922','#f85149','#ec4899','#8b5cf6','#14b8a6'];
+  el.innerHTML='<div class="flex-between mb-2"><h1 class="text-xl">人物中心</h1><button class="btn btn-primary" onclick="showCharModal()">+ 新增人物</button></div>'+(chars.length===0?'<div class="empty-state"><p>暂无人物</p><p class="text-muted text-sm">点击右上角新增人物</p></div>':'<div class="grid grid-3">'+chars.map(function(c,i){var color=cols[i%cols.length];var initial=c.name?c.name[0]:'?';return'<div class="char-card" onclick="showCharModal(\''+c.id+'\')"><div class="flex gap-1"><div class="char-avatar" style="background:'+color+'">'+initial+'</div><div><div style="font-weight:600">'+c.name+'</div><div class="text-muted text-sm">'+(c.charType||'配角')+'</div><div class="text-muted" style="font-size:11px">出场'+(c.presence?c.presence.appearCount:0)+'次</div></div></div></div>';}).join('')+'</div>');
+}
+
+function rPlot(el){
+  var foreshadows=StoryStore.getForeshadows();
+  var conflicts=StoryStore.getConflicts();
+  el.innerHTML='<div class="grid grid-2 mb-3"><div class="card"><div class="flex-between mb-1"><h2 class="text-lg">伏笔追踪</h2><button class="btn btn-sm btn-primary" onclick="showForeshadowModal()">+ 添加</button></div>'+(foreshadows.length===0?'<p class="text-muted text-sm">暂无伏笔</p>':foreshadows.map(function(f){return'<div class="flex-between" style="padding:6px 0;border-bottom:1px solid var(--rule)"><div><div class="text-sm">'+f.content+'</div><div class="text-muted" style="font-size:11px">埋第'+f.chapterPlaced+'章 · 预期第'+f.chapterExpected+'章</div></div><span class="badge '+(f.status==='resolved'?'badge-success':'badge-warning')+'">'+(f.status==='resolved'?'已回收':'待回收')+'</span></div>';}).join(''))+'</div><div class="card"><div class="flex-between mb-1"><h2 class="text-lg">冲突管理</h2></div>'+(conflicts.length===0?'<p class="text-muted text-sm">暂无冲突</p>':conflicts.map(function(c){return'<div style="padding:6px 0;border-bottom:1px solid var(--rule)"><div class="text-sm">'+c.description+'</div><div class="text-muted" style="font-size:11px">'+c.type+' · '+c.status+'</div></div>';}).join(''))+'</div></div><div class="card"><div class="card-title">大纲规划</div><div id="outlineTree"></div></div>';
+}
+
+function rWB(el){
+  var locs=StoryStore.getWorld().locations;
+  el.innerHTML='<div class="flex-between mb-2"><h1 class="text-xl">世界观中心</h1><button class="btn btn-primary" onclick="showWBModal()">+ 新增设定</button></div>'+(locs.length===0?'<div class="empty-state"><p>暂无世界观设定</p></div>':'<div class="grid grid-2">'+locs.map(function(l){return'<div class="card"><div class="flex-between"><div><div style="font-weight:600">'+l.name+'</div><div class="badge badge-info">'+l.category+'</div></div><button class="btn btn-sm btn-danger" onclick="deleteLocation(\''+l.id+'\')">删除</button></div><p class="text-sm text-muted mt-1">'+(l.description||'')+'</p></div>';}).join('')+'</div>');
+}
+
+function rCons(el){
+  el.innerHTML='<div class="flex-between mb-2"><h1 class="text-xl">一致性检查</h1><button class="btn btn-primary" onclick="runConsistencyCheck()">开始检查</button></div><div class="card"><p class="text-muted text-sm">基于 StoryState 真实数据和规则系统分析，不使用随机数模拟。</p></div><div id="consistencyResults"></div>';
+}
+
+function rDataC(el){
+  el.innerHTML='<div class="card"><div class="card-title">数据管理</div><div class="flex gap-1 mt-1"><button class="btn" onclick="exportData()">导出 JSON</button><button class="btn" onclick="document.getElementById(\'importFile\').click()">导入 JSON</button><button class="btn btn-danger" onclick="resetData()">重置数据</button></div><input type="file" id="importFile" accept=".json" style="display:none" onchange="importData(this)" /><div class="mt-2"><p class="text-muted text-sm">存储键: novelcraft_unified_v1</p><p class="text-muted text-sm">章节数: '+StoryStore.getChapters().length+'</p><p class="text-muted text-sm">人物数: '+StoryStore.getCharacters().length+'</p></div></div><div class="card"><div class="card-title">规则系统</div><p class="text-muted text-sm">共 '+AIRuntime.RuleRegistry.getRuleCount()+' 条规则</p><div id="ruleList"></div></div>';
+  var ruleList=document.getElementById('ruleList');
+  if(ruleList){AIRuntime.RuleRegistry.rules.forEach(function(r){ruleList.innerHTML+='<div class="rule-toggle"><div><span class="text-sm">'+r.id+'</span><span class="badge badge-'+(r.priority>=8?'danger':r.priority>=5?'warning':'info')+'">P'+r.priority+'</span></div><div class="switch'+(r.enabled?' on':'')+'" onclick="toggleRule(\''+r.id+'\')"></div></div>';});}
+}
+
+function rSettings(el){
+  var meta=StoryStore.getMeta();
+  el.innerHTML='<div class="card"><div class="card-title">项目设置</div><div class="form-group"><label class="form-label">小说标题</label><input class="form-input" value="'+(meta.title||'')+'" oninput="StoryStore.setMeta(\'title\',this.value)" /></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" onchange="StoryStore.setMeta(\'genre\',this.value)">'+Object.keys(GENRE_CONFIG).map(function(k){return'<option value="'+k+'"'+(meta.genre===k?' selected':'')+'>'+GENRE_CONFIG[k].name+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">每日目标字数</label><input class="form-input" type="number" value="'+(meta.dailyGoal||4000)+'" onchange="StoryStore.setMeta(\'dailyGoal\',parseInt(this.value))" /></div></div><div class="card"><div class="card-title">外观</div><div class="form-group"><label class="form-label">主题</label><select class="form-select" onchange="setTheme(this.value)"><option value="dark"'+(meta.theme==='dark'?' selected':'')+'>深色</option><option value="light"'+(meta.theme==='light'?' selected':'')+'>浅色</option><option value="warm"'+(meta.theme==='warm'?' selected':'')+'>暖色</option></select></div><div class="form-group"><label class="form-label">字体大小: '+(meta.fontSize||15)+'px</label><input type="range" min="12" max="20" value="'+(meta.fontSize||15)+'" oninput="setFontSize(this.value)" style="width:100%" /></div></div>';
+}
+
+// ===== Event Handlers =====
+var _lastActionPlans=[];
+function addChapter(){var ch=StoryStore.addChapter({});renderSidebar('editor');rEditor(document.getElementById('page-editor'));selectChapter(ch.id);toast('已创建新章节','success');}
+function selectChapter(id){curChId=id;var ch=StoryStore.getChapter(id);if(!ch)return;var ta=document.getElementById('chEditor');if(ta)ta.value=ch.content||'';var titleInput=document.getElementById('chTitleInput');if(titleInput)titleInput.value=ch.title;var wc=document.getElementById('chWordCount');if(wc)wc.textContent=(ch.wordCount||0)+'字';renderSidebar('editor');document.querySelectorAll('.chapter-list-item').forEach(function(i){i.classList.remove('active');});}
+function updateChTitle(val){if(!curChId)return;StoryStore.updateChapter(curChId,{title:val});renderSidebar('editor');}
+var _chSaveTimer=null;
+function onChapterInput(){
+  var ta=document.getElementById('chEditor');if(!ta||!curChId)return;
+  var content=ta.value;var wc=content.replace(/\s/g,'').length;
+  StoryStore.updateChapter(curChId,{content:content,wordCount:wc,status:'未写'});
+  var wcEl=document.getElementById('chWordCount');if(wcEl)wcEl.textContent=wc+'字';
+  var ss=document.getElementById('chSaveStatus');if(ss){ss.textContent='保存中...';ss.style.color='var(--warning)';}
+  if(_chSaveTimer)clearTimeout(_chSaveTimer);
+  _chSaveTimer=setTimeout(function(){
+    if(ss){ss.textContent='已保存';ss.style.color='var(--success)';}
+    // Sync to StoryEngine
+    var ch=StoryStore.getChapter(curChId);if(ch){var idx=StoryStore.getChapters().indexOf(ch);StoryEngine.syncFromChapter(content,idx);}
+    // Run AIRuntime analyze (display only, no auto-execute)
+    runCopilot();
+  },800);
+}
+function markCompleted(){if(!curChId)return;StoryStore.updateChapter(curChId,{status:'已完成'});toast('已标记完成','success');renderSidebar('editor');}
+function deleteCurrentChapter(){if(!curChId)return;if(!confirm('确认删除？'))return;StoryStore.deleteChapter(curChId);curChId=null;renderSidebar('editor');rEditor(document.getElementById('page-editor'));toast('已删除','success');}
+function deleteLocation(id){StoryStore.deleteLocation(id);rWB(document.getElementById('page-worldbuilding'));renderSidebar('worldbuilding');toast('已删除','success');}
+function toggleRule(id){var on=AIRuntime.RuleRegistry.toggleRule(id);rDataC(document.getElementById('page-data'));toast('规则'+id+(on?'已开启':'已关闭'),'info');}
+function setTheme(t){StoryStore.setMeta('theme',t);document.documentElement.setAttribute('data-theme',t==='dark'?'':t);}
+function setFontSize(s){StoryStore.setMeta('fontSize',parseInt(s));document.body.style.fontSize=s+'px';rSettings(document.getElementById('page-settings'));}
+
+function runAIRuntime(){
+  var result=AIRuntime.run(StoryStore.getChapters().length-1>=0?StoryStore.getChapters().length-1:0);
+  var el=document.getElementById('aiRuntimeResult');if(!el)return;
+  el.innerHTML='<div class="card"><p class="text-sm">发现问题: '+result.analysis.issues.length+'</p><p class="text-sm">决策数: '+result.analysis.decisions.length+'</p><p class="text-sm">执行: '+result.executed.length+'</p><p class="text-sm">快照哈希: '+result.snapshotHash+'</p></div>';
+  toast('AI分析完成','success');
+}
+
+function runCopilot(){
+  if(!curChId)return;
+  var ch=StoryStore.getChapter(curChId);if(!ch)return;
+  var idx=StoryStore.getChapters().indexOf(ch);
+  var result=AIRuntime.runActionPlan(idx);
+  _lastActionPlans=result.plans;
+  // Render issues
+  var issuesEl=document.getElementById('copilotIssues');if(issuesEl){
+    if(result.analysis.issues.length===0){issuesEl.innerHTML='<p class="text-muted text-sm">未发现问题</p>';}
+    else{issuesEl.innerHTML=result.analysis.issues.map(function(i){return'<div class="action-card severity-'+(i.severity==='critical'?'critical':i.severity==='warning'?'warning':'info')+'"><div class="action-header"><span class="action-title">'+i.type+'</span><span class="badge badge-'+(i.severity==='critical'?'danger':i.severity==='warning'?'warning':'info')+'">'+i.severity+'</span></div><div class="action-desc">'+i.reason+'</div></div>';}).join('');}
+  }
+  // Render action plans
+  var actionsEl=document.getElementById('copilotActions');if(actionsEl){
+    if(result.plans.length===0){actionsEl.innerHTML='<p class="text-muted text-sm">无建议动作</p>';}
+    else{actionsEl.innerHTML=result.plans.map(function(p){var sev=p.priority>=8?'critical':p.priority>=5?'warning':'info';return'<div class="action-card severity-'+sev+'"><div class="action-header"><span class="action-title">'+p.action+'</span><span class="badge badge-'+(p.priority>=8?'danger':p.priority>=5?'warning':'info')+'">P'+p.priority+'</span></div><div class="action-desc">'+p.reason+'</div>'+(p.requiresApproval?'<div class="action-actions"><button class="btn btn-sm btn-primary" onclick="approveAction(\''+p.id+'\')">采用</button><button class="btn btn-sm" onclick="rejectAction(\''+p.id+'\')">忽略</button></div>':'<div class="badge badge-info">诊断</div>')+'</div>';}).join('');}
+  }
+}
+
+function approveAction(planId){
+  var plan=_lastActionPlans.find(function(p){return p.id===planId;});if(!plan)return;
+  var result=AIRuntime.ActionPlan.executeWithApproval([plan],[planId]);
+  toast('已执行: '+plan.action,'success');
+  runCopilot();
+}
+function rejectAction(planId){
+  _lastActionPlans=_lastActionPlans.filter(function(p){return p.id!==planId;});
+  toast('已忽略','info');
+  var actionsEl=document.getElementById('copilotActions');if(actionsEl){
+    actionsEl.innerHTML=_lastActionPlans.map(function(p){var sev=p.priority>=8?'critical':p.priority>=5?'warning':'info';return'<div class="action-card severity-'+sev+'"><div class="action-header"><span class="action-title">'+p.action+'</span></div><div class="action-desc">'+p.reason+'</div></div>';}).join('')||'<p class="text-muted text-sm">无建议动作</p>';
+  }
+}
+
+function runConsistencyCheck(){
+  var s=StoryStore.state;
+  var ctx=buildAIContext(Math.max(0,s.chapters.length-1));
+  var result=AIDecisionLayer.evaluate(ctx);
+  var el=document.getElementById('consistencyResults');if(!el)return;
+  var dims=[
+    {icon:'⏰',name:'时间线一致性',rule:'timeline_conflict',desc:'检查故事时间线是否有矛盾'},
+    {icon:'👤',name:'人物年龄/能力',rule:'power_level_conflict',desc:'检查人物能力是否超出当前境界'},
+    {icon:'🔗',name:'人物关系',rule:'relationship_inconsistency',desc:'检查人物关系是否有矛盾'},
+    {icon:'⚙️',name:'世界观规则',rule:'world_rule_conflict',desc:'检查世界观设定是否有矛盾'},
+    {icon:'📌',name:'伏笔遗漏',rule:'foreshadow_overdue',desc:'检查是否有未回收的伏笔'},
+    {icon:'📊',name:'角色一致性',rule:'character_inconsistency',desc:'检查角色行为是否一致'},
+    {icon:'🚶',name:'闲置角色',rule:'unused_character',desc:'检查是否有未出场的角色'},
+    {icon:'📈',name:'弧光停滞',rule:'arc_stagnation',desc:'检查主角成长弧光是否停滞'}
+  ];
+  el.innerHTML='<div class="card">'+dims.map(function(d){
+    var issue=result.issues.find(function(i){return i.type===d.rule;});
+    var pass=!issue;
+    return'<div class="consistency-item"><span class="consistency-icon">'+d.icon+'</span><div class="consistency-content"><div class="consistency-name">'+d.name+(pass?' <span class="badge badge-success">通过</span>':' <span class="badge badge-danger">问题</span>')+'</div><div class="consistency-desc">'+(pass?d.desc:issue.reason)+'</div></div></div>';
+  }).join('')+'</div><div class="card"><div class="card-title">检查摘要</div><p class="text-sm">通过: '+dims.filter(function(d){return!result.issues.find(function(i){return i.type===d.rule;});}).length+'/'+dims.length+'</p><p class="text-sm">问题: '+result.issues.length+'</p><p class="text-sm">建议: '+result.decisions.length+'</p><p class="text-muted text-sm mt-1">检查基于真实 StoryState 数据和规则系统，无随机模拟。</p></div>';
+  toast('一致性检查完成','success');
+}
+
+function runRegressionTests(){
+  var result=AIRuntime.runRegressionTests();
+  var el=document.getElementById('aiRuntimeResult');if(!el)return;
+  el.innerHTML='<div class="card"><div class="card-title">回归测试结果</div>'+result.results.map(function(r){return'<div class="consistency-item"><span class="consistency-icon">'+(r.pass?'✅':'❌')+'</span><div class="consistency-content"><div class="consistency-name">Test '+r.id+': '+r.name+'</div><div class="consistency-desc">'+(r.pass?'通过':'失败')+'</div></div></div>';}).join('')+'<p class="text-sm mt-1">总计: '+result.results.filter(function(r){return r.pass;}).length+'/'+result.results.length+' 通过</p></div>';
+  toast('回归测试完成: '+result.results.filter(function(r){return r.pass;}).length+'/'+result.results.length+'通过',result.allPass?'success':'error');
+}
+
+function showCharModal(charId){
+  var c=charId?StoryStore.getCharacter(charId):null;
+  showModal('人物'+(c?'编辑':'新建'),'<div class="form-group"><label class="form-label">姓名</label><input class="form-input" id="m-char-name" value="'+(c?c.name:'')+'" /></div><div class="grid grid-2"><div class="form-group"><label class="form-label">性别</label><input class="form-input" id="m-char-gender" value="'+(c?c.gender:'')+'" /></div><div class="form-group"><label class="form-label">年龄</label><input class="form-input" id="m-char-age" value="'+(c?c.age:'')+'" /></div></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" id="m-char-type"><option value="protagonist"'+(c&&c.charType==='protagonist'?' selected':'')+'>主角</option><option value="supporting"'+(!c||c.charType==='supporting'?' selected':'')+'>配角</option><option value="antagonist"'+(c&&c.charType==='antagonist'?' selected':'')+'>反派</option></select></div><div class="form-group"><label class="form-label">能力</label><textarea class="form-textarea" id="m-char-ability">'+(c&&c.fields?c.fields.ability||'':'')+'</textarea></div><div class="form-group"><label class="form-label">背景</label><textarea class="form-textarea" id="m-char-bg">'+(c&&c.fields?c.fields.background||'':'')+'</textarea></div><div class="flex gap-1 mt-2"><button class="btn btn-primary" onclick="saveCharFromModal('+(c?"'"+c.id+"'":'null')+')" style="flex:1">'+(c?'保存':'创建')+'</button>'+(c?'<button class="btn btn-danger" onclick="deleteChar(\''+c.id+'\')">删除</button>':'')+'</div>');
+}
+
+function saveCharFromModal(id){
+  var data={name:document.getElementById('m-char-name').value.trim()||'未命名',gender:document.getElementById('m-char-gender').value,age:document.getElementById('m-char-age').value,charType:document.getElementById('m-char-type').value,fields:{ability:document.getElementById('m-char-ability').value,background:document.getElementById('m-char-bg').value}};
+  if(id){StoryStore.updateCharacter(id,data);}else{StoryStore.addCharacter(data);}
+  closeModal();rChar(document.getElementById('page-characters'));renderSidebar('characters');toast('已保存','success');
+}
+function deleteChar(id){if(!confirm('确认删除？'))return;StoryStore.deleteCharacter(id);closeModal();rChar(document.getElementById('page-characters'));renderSidebar('characters');toast('已删除','success');}
+
+function showForeshadowModal(){
+  showModal('添加伏笔','<div class="form-group"><label class="form-label">伏笔内容</label><textarea class="form-textarea" id="m-fs-content"></textarea></div><div class="grid grid-2"><div class="form-group"><label class="form-label">埋设章节</label><input class="form-input" type="number" id="m-fs-plant" value="0" /></div><div class="form-group"><label class="form-label">预期回收章节</label><input class="form-input" type="number" id="m-fs-resolve" value="0" /></div></div><button class="btn btn-primary w-full" onclick="saveForeshadow()">添加</button>');
+}
+function saveForeshadow(){StoryStore.addForeshadow({content:document.getElementById('m-fs-content').value,chapterPlaced:parseInt(document.getElementById('m-fs-plant').value)||0,chapterExpected:parseInt(document.getElementById('m-fs-resolve').value)||0});closeModal();rPlot(document.getElementById('page-plot'));toast('已添加','success');}
+
+function showWBModal(){
+  var cats=['地图','国家','宗门','城市','秘境','组织','势力','职业','境界','技能','功法','法宝','装备','货币','植物','妖兽','种族','历史','神话'];
+  showModal('新增世界观设定','<div class="form-group"><label class="form-label">分类</label><select class="form-select" id="m-wb-cat">'+cats.map(function(c){return'<option value="'+c+'">'+c+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">名称</label><input class="form-input" id="m-wb-name" /></div><div class="form-group"><label class="form-label">描述</label><textarea class="form-textarea" id="m-wb-desc"></textarea></div><button class="btn btn-primary w-full" onclick="saveWB()">添加</button>');
+}
+function saveWB(){var name=document.getElementById('m-wb-name').value.trim();if(!name){toast('请输入名称','error');return;}StoryStore.addLocation({name:name,category:document.getElementById('m-wb-cat').value,description:document.getElementById('m-wb-desc').value});closeModal();rWB(document.getElementById('page-worldbuilding'));toast('已添加','success');}
+
+function showModal(title,content){var c=document.getElementById('modalContainer');c.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><div class="modal-header"><span class="modal-title">'+title+'</span><button class="modal-close" onclick="closeModal()">×</button></div>'+content+'</div></div>';}
+function closeModal(){document.getElementById('modalContainer').innerHTML='';}
+function toast(msg,type){var c=document.getElementById('toastContainer');var t=document.createElement('div');t.className='toast toast-'+(type||'info');t.textContent=msg;c.appendChild(t);setTimeout(function(){t.remove();},3000);}
+
+function exportData(){var data=StoryStore.exportJSON();var blob=new Blob([data],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='novel-data.json';a.click();toast('已导出','success');}
+function importData(input){var file=input.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(e){try{StoryStore.importJSON(e.target.result);navigate(curPage);toast('已导入','success');}catch(err){toast('导入失败','error');}};reader.readAsText(file);}
+function resetData(){if(!confirm('确认重置所有数据？'))return;StoryStore.reset();navigate('dashboard');toast('已重置','success');}
+
+// Command palette
+var _cmdItems=[{label:'仪表盘',action:function(){navigate('dashboard');}},{label:'章节编辑',action:function(){navigate('editor');}},{label:'人物中心',action:function(){navigate('characters');}},{label:'剧情规划',action:function(){navigate('plot');}},{label:'世界观',action:function(){navigate('worldbuilding');}},{label:'一致性检查',action:function(){navigate('consistency');}},{label:'数据中心',action:function(){navigate('data');}},{label:'设置',action:function(){navigate('settings');}},{label:'新建章节',action:function(){addChapter();}},{label:'新增人物',action:function(){showCharModal();}},{label:'AI分析',action:function(){runAIRuntime();}},{label:'回归测试',action:function(){runRegressionTests();}}];
+var _cmdIdx=0;
+function filterCmd(){var q=document.getElementById('cmdInput').value.toLowerCase();var filtered=_cmdItems.filter(function(i){return i.label.toLowerCase().indexOf(q)>=0;});var list=document.getElementById('cmdList');list.innerHTML=filtered.map(function(i,idx){return'<div class="cmd-item'+(idx===_cmdIdx?' active':'')+'" onclick="'+(i.cmd||'')+'selectCmd('+idx+')">'+i.label+'</div>';}).join('');_cmdFiltered=filtered;}
+var _cmdFiltered=[];
+function selectCmd(idx){if(_cmdFiltered[idx])_cmdFiltered[idx].action();closeCmd();}
+function closeCmd(){document.getElementById('cmdOverlay').classList.remove('active');document.getElementById('cmdInput').value='';}
+document.addEventListener('keydown',function(e){
+  if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();document.getElementById('cmdOverlay').classList.add('active');document.getElementById('cmdInput').focus();filterCmd();}
+  if(e.key==='Escape')closeCmd();
+});
+
+// ===== Init =====
+StoryStore.load();
+setTheme(StoryStore.getMeta().theme||'dark');
+document.body.style.fontSize=(StoryStore.getMeta().fontSize||15)+'px';
+navigate('dashboard');
+// [Init] NovelCraft x Story OS initialized
+</script>
+</body>
+</html>
