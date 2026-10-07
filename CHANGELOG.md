@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.2.0 - Phase 5.1 (State Contract & Auditable Change)
+
+### Added
+
+- StoryStore Schema 层：`normalize` / `migrate` / `validate`（`SCHEMA_VERSION` 保持 2）
+- `relationships` 顶层集合，与 `characters[].relations` 双向兼容（幂等镜像）
+- 导入管线：`JSON parse → migration → normalization → validation → commit`；非法 import 不覆盖当前状态
+- Runtime Contracts（纯数据）：`EntityRef` / `Evidence` / `StateChange` / `ChangeSet` / `ValidationResult`
+- 确定性 ID：实体 `<prefix>_NNN`、`changeSetId = cs_<hash>`、`changeId = chg_<hash>`（不使用随机数作为业务身份）
+- `StoryStore.structuredDiff(before, after)`：路径级 `add / remove / update`
+- Snapshot / Rollback 强化：校验 → normalize → validate → 原子替换，失败不污染当前状态
+- ChangeSet 生命周期：`PROPOSED → VALIDATING → VALID → APPROVED → APPLIED → VERIFIED`，异常 `REJECTED / FAILED`
+- 五道门禁：合法性 / 重复 / 过期(stale) / `before` 前置条件 / 批准
+- 审计账本 `narrative_state.changeLedger`（随 StoryState 持久化，无第二数据源）
+- `StoryEngine.proposeChapterChanges()`：解析与写入分离，只产出 ChangeSet
+- `AIRuntime.applyChangeSet()` / `proposeChangeSet()` / `validateChangeSet()` / `approveChangeSet()` / `rejectChangeSet()`
+- `docs/phase5-runtime-contract.md`
+- 回归测试由 10 项扩展到 34 项（Phase 4 的 10 项全部保留）
+
+### Changed
+
+- `StoryStore.snapshot()` 现在返回**规范化后的深拷贝**（不再与 `_state` 共享引用）
+- `StoryStore.rollback()` 现在执行校验并返回 `{ ok, errors, warnings }`（旧行为为直接替换、返回 undefined）
+- `StoryStore.importJSON()` 现在返回 `{ ok, stage, errors, warnings }`，失败时**不修改**当前状态（旧行为为直接赋值）
+- `StoryStore.load()` 复用同一导入管线，坏数据不再载入内存
+- `StoryEngine.syncFromChapter()` 不再直接写 `StoryStore.state._lastParseResult`，改走 `StoryStore.setLastParseResult()`
+- `AIRuntime.run()` 不再直接写 `StoryStore.state.narrative_state.lastAnalysis`，改走 `StoryStore.setNarrativeState()`
+- `importData()`（UI）依据导入结果提示成功/失败，不再对失败静默报成功
+- README 修正：AI Provider 标注为"尚未接入"，不再声称存在 Mock 抽象
+
+### Notes
+
+- **当前没有真实 LLM**：本阶段不引入任何模型调用、网络层或 Provider 实现
+- 仍保留一条遗留直写路径：`AIExecutionLayer.execute / _applyDecision` 直接修改 StoryState（属 Phase 5.2 收口范围）
+- 未改动 `APP_VERSION` / `STORY_STATE_VERSION` / `SCHEMA_VERSION`
+
 ## v0.2.0 - Phase 4 (2026-09-08)
 
 ### Added

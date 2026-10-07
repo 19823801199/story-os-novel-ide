@@ -166,15 +166,388 @@ var StoryStore=(function(){
       _schema:SCHEMA_VERSION,
       _stateVersion:STORY_STATE_VERSION,
       meta:{title:'未命名小说',genre:'fantasy',dailyGoal:4000,createdAt:0,theme:'dark',fontSize:15,autoSave:true},
-      chapters:[],characters:[],world:{setting:{},locations:[],factions:[],rules:[]},
+      chapters:[],characters:[],relationships:[],world:{setting:{},locations:[],factions:[],rules:[]},
       timeline:[],foreshadowing:[],conflicts:[],
-      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[]},
+      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[]},
       _lastParseResult:null
     };
   }
 
   function uid(){return'_'+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);}
   function deepClone(o){return JSON.parse(JSON.stringify(o));}
+
+  // ===== Phase 5.1: schema helpers (normalize / migrate / validate / structuredDiff) =====
+  var COLLECTIONS=['chapters','characters','relationships','timeline','foreshadowing','conflicts'];
+  var ID_PREFIX={chapters:'chapter',characters:'character',relationships:'relationship',timeline:'timeline',foreshadowing:'foreshadow',conflicts:'conflict'};
+  var CHANGE_TYPES=['add','remove','update'];
+  var META_DEFAULTS={title:'未命名小说',genre:'fantasy',dailyGoal:4000,createdAt:0,theme:'dark',fontSize:15,autoSave:true};
+
+  function hashString(str){var h=5381;for(var i=0;i<str.length;i++){h=((h<<5)+h)+str.charCodeAt(i);h=h&0xFFFFFFFF;}return(h>>>0).toString(16);}
+  function hashObj(obj){return hashString(JSON.stringify(obj));}
+  function pad3(n){var s=String(n);while(s.length<3)s='0'+s;return s;}
+  function isPlainObject(v){return!!v&&typeof v==='object'&&!Array.isArray(v);}
+  function asArray(v){return Array.isArray(v)?v:[];}
+  function asObject(v){return isPlainObject(v)?v:{};}
+  function asString(v,d){return typeof v==='string'?v:((v===undefined||v===null)?d:String(v));}
+  function asNumber(v,d){var n=typeof v==='number'?v:parseFloat(v);return isFinite(n)?n:d;}
+
+  // Deterministic, testable entity ids: <prefix>_001, <prefix>_002, ...
+  function nextEntityId(prefix,list){
+    var max=0;
+    asArray(list).forEach(function(item){
+      var m=/^([a-z]+)_(\d+)$/.exec(asString(item&&item.id,''));
+      if(m&&m[1]===prefix){var n=parseInt(m[2],10);if(n>max)max=n;}
+    });
+    return prefix+'_'+pad3(max+1);
+  }
+  function collectFunctionPaths(value,path,out){
+    out=out||[];path=path||'$';
+    if(typeof value==='function'){out.push(path);return out;}
+    if(Array.isArray(value)){value.forEach(function(v,i){collectFunctionPaths(v,path+'['+i+']',out);});return out;}
+    if(isPlainObject(value)){Object.keys(value).forEach(function(k){collectFunctionPaths(value[k],path+'.'+k,out);});return out;}
+    return out;
+  }
+  function stripFunctions(value){
+    if(typeof value==='function')return undefined;
+    if(Array.isArray(value)){for(var i=value.length-1;i>=0;i--){var sv=stripFunctions(value[i]);if(sv===undefined)value.splice(i,1);else value[i]=sv;}return value;}
+    if(isPlainObject(value)){Object.keys(value).forEach(function(k){var sv=stripFunctions(value[k]);if(sv===undefined)delete value[k];else value[k]=sv;});return value;}
+    return value;
+  }
+
+  // normalize: pure + idempotent. Never mutates the input, never uses randomness.
+  function normalize(input){
+    var warnings=[];
+    var src=isPlainObject(input)?input:{};
+    if(Array.isArray(input))warnings.push('normalize: expected object, got array');
+    var out=createEmptyState();
+    out._schema=asNumber(src._schema,SCHEMA_VERSION);
+    out._stateVersion=STORY_STATE_VERSION;
+    delete out.relationships;
+    out.relationships=[];
+    delete out._lastParseResult;
+    out._lastParseResult=(src._lastParseResult===undefined?null:deepClone(src._lastParseResult));
+
+    // meta
+    out.meta=asObject(src.meta);
+    Object.keys(META_DEFAULTS).forEach(function(k){if(out.meta[k]===undefined)out.meta[k]=META_DEFAULTS[k];});
+    out.meta.title=asString(out.meta.title,META_DEFAULTS.title);
+    out.meta.genre=asString(out.meta.genre,META_DEFAULTS.genre);
+    out.meta.dailyGoal=asNumber(out.meta.dailyGoal,META_DEFAULTS.dailyGoal);
+    out.meta.createdAt=asNumber(out.meta.createdAt,META_DEFAULTS.createdAt);
+    out.meta.theme=asString(out.meta.theme,META_DEFAULTS.theme);
+    out.meta.fontSize=asNumber(out.meta.fontSize,META_DEFAULTS.fontSize);
+    out.meta.autoSave=out.meta.autoSave!==false;
+
+    // world
+    var worldIn=asObject(src.world);
+    out.world={setting:asObject(worldIn.setting),locations:[],factions:asArray(worldIn.factions),rules:asArray(worldIn.rules)};
+    if(worldIn.outlines!==undefined)out.world.outlines=asArray(worldIn.outlines);
+    var locations=[];
+    if(worldIn.locations!==undefined&&!Array.isArray(worldIn.locations))warnings.push('world.locations: expected array');
+    asArray(worldIn.locations).forEach(function(loc){
+      loc=asObject(loc);
+      var id=asString(loc.id,'');
+      if(!id||locations.some(function(x){return x.id===id;})){id=nextEntityId('location',locations);warnings.push('world.locations: assigned id '+id);}
+      locations.push({id:id,name:asString(loc.name,''),category:asString(loc.category,'其他'),description:asString(loc.description,''),attributes:asObject(loc.attributes)});
+    });
+    out.world.locations=locations;
+
+    // chapters
+    if(src.chapters!==undefined&&!Array.isArray(src.chapters))warnings.push('chapters: expected array, got '+typeof src.chapters);
+    var chapters=[];
+    asArray(src.chapters).forEach(function(ch,idx){
+      ch=asObject(ch);
+      var id=asString(ch.id,'');
+      if(!id||chapters.some(function(x){return x.id===id;})){id=nextEntityId('chapter',chapters);warnings.push('chapters: assigned id '+id);}
+      var analysis=asObject(ch.aiAnalysis);
+      chapters.push({
+        id:id,title:asString(ch.title,'第'+(idx+1)+'章'),summary:asString(ch.summary,''),
+        content:asString(ch.content,''),wordCount:asNumber(ch.wordCount,0),status:asString(ch.status,'未写'),
+        order:asNumber(ch.order,idx),
+        aiAnalysis:{characters:asArray(analysis.characters),locations:asArray(analysis.locations),events:asArray(analysis.events),
+          foreshadowHits:asArray(analysis.foreshadowHits),emotions:asArray(analysis.emotions),timeHints:asArray(analysis.timeHints),
+          lastParsed:asNumber(analysis.lastParsed,0)}
+      });
+    });
+    out.chapters=chapters;
+
+    // characters
+    if(src.characters!==undefined&&!Array.isArray(src.characters))warnings.push('characters: expected array');
+    var characters=[];
+    asArray(src.characters).forEach(function(c,idx){
+      c=asObject(c);
+      var id=asString(c.id,'');
+      if(!id||characters.some(function(x){return x.id===id;})){id=nextEntityId('character',characters);warnings.push('characters: assigned id '+id);}
+      var presence=asObject(c.presence),profile=asObject(c.aiProfile);
+      characters.push({
+        id:id,name:asString(c.name,'未命名'),gender:asString(c.gender,''),age:asString(c.age,''),
+        charType:asString(c.charType,'supporting'),tags:asArray(c.tags),fields:asObject(c.fields),
+        relations:asArray(c.relations).map(function(r){r=asObject(r);return{targetId:asString(r.targetId,''),type:asString(r.type,'')};}),
+        presence:{firstAppear:asNumber(presence.firstAppear,0),lastAppear:asNumber(presence.lastAppear,0),
+          chapterIds:asArray(presence.chapterIds),appearCount:asNumber(presence.appearCount,0)},
+        aiProfile:{arcStage:asString(profile.arcStage,''),consistencyScore:asNumber(profile.consistencyScore,100),
+          importance:asNumber(profile.importance,idx===0?10:5)}
+      });
+    });
+    out.characters=characters;
+
+    // relationships (top-level; mirrored from characters[].relations for backward compat)
+    var relationships=[];
+    asArray(src.relationships).forEach(function(r){
+      r=asObject(r);
+      var fromId=asString(r.fromId!==undefined?r.fromId:(r.sourceId!==undefined?r.sourceId:''),'');
+      var toId=asString(r.toId!==undefined?r.toId:(r.targetId!==undefined?r.targetId:''),'');
+      if(!fromId&&!toId)return;
+      var id=asString(r.id,'');
+      if(!id||relationships.some(function(x){return x.id===id;}))id=nextEntityId('relationship',relationships);
+      relationships.push({id:id,fromId:fromId,toId:toId,type:asString(r.type,''),note:asString(r.note,'')});
+    });
+    out.characters.forEach(function(c){
+      c.relations.forEach(function(rel){
+        if(!rel.targetId)return;
+        var exists=relationships.some(function(r){return r.fromId===c.id&&r.toId===rel.targetId&&r.type===rel.type;});
+        if(!exists)relationships.push({id:nextEntityId('relationship',relationships),fromId:c.id,toId:rel.targetId,type:rel.type,note:''});
+      });
+    });
+    out.relationships=relationships;
+
+    // timeline
+    var timeline=[];
+    asArray(src.timeline).forEach(function(t){
+      t=asObject(t);
+      var id=asString(t.id,'');
+      if(!id||timeline.some(function(x){return x.id===id;}))id=nextEntityId('timeline',timeline);
+      timeline.push({id:id,date:asString(t.date,''),event:asString(t.event,''),chapterId:(t.chapterId===undefined?null:t.chapterId),type:asString(t.type,'event')});
+    });
+    out.timeline=timeline;
+
+    // foreshadowing
+    var foreshadowing=[];
+    asArray(src.foreshadowing).forEach(function(f){
+      f=asObject(f);
+      var id=asString(f.id,'');
+      if(!id||foreshadowing.some(function(x){return x.id===id;}))id=nextEntityId('foreshadow',foreshadowing);
+      foreshadowing.push({id:id,content:asString(f.content,''),chapterPlaced:asNumber(f.chapterPlaced,0),
+        chapterExpected:asNumber(f.chapterExpected,0),status:asString(f.status,'pending'),note:asString(f.note,''),
+        linkedChapterId:(f.linkedChapterId===undefined?null:f.linkedChapterId)});
+    });
+    out.foreshadowing=foreshadowing;
+
+    // conflicts
+    var conflicts=[];
+    asArray(src.conflicts).forEach(function(c){
+      c=asObject(c);
+      var id=asString(c.id,'');
+      if(!id||conflicts.some(function(x){return x.id===id;}))id=nextEntityId('conflict',conflicts);
+      conflicts.push({id:id,type:asString(c.type,'person_vs_person'),description:asString(c.description,''),
+        parties:asArray(c.parties),status:asString(c.status,'active'),chapterStarted:asNumber(c.chapterStarted,0),
+        chapterResolved:(c.chapterResolved===undefined?null:c.chapterResolved)});
+    });
+    out.conflicts=conflicts;
+
+    // narrative_state (+ audit ledger stays inside the single source of truth)
+    var ns=asObject(src.narrative_state);
+    out.narrative_state={
+      currentArc:asString(ns.currentArc,''),paceScore:asNumber(ns.paceScore,0),tensionLevel:asNumber(ns.tensionLevel,0),
+      activeConflicts:asArray(ns.activeConflicts),pendingForeshadows:asArray(ns.pendingForeshadows),
+      characterPresence:asObject(ns.characterPresence),lastAnalysis:asNumber(ns.lastAnalysis,0),
+      aiSuggestions:asObject(ns.aiSuggestions),issues:asArray(ns.issues),changeLedger:asArray(ns.changeLedger)
+    };
+
+    // contracts must be pure data: strip executable values
+    var fnPaths=collectFunctionPaths(out);
+    if(fnPaths.length){stripFunctions(out);warnings.push('normalize: stripped functions at '+fnPaths.join(', '));}
+    return {state:out,warnings:warnings};
+  }
+
+  function migrateState(raw){
+    var migration={from:null,to:SCHEMA_VERSION,applied:[]};
+    if(!isPlainObject(raw)){migration.from='invalid';migration.applied.push('reset:non-object');return{state:createEmptyState(),migration:migration};}
+    if(raw._stateVersion!==undefined||raw._schema!==undefined){
+      var from=asNumber(raw._schema,0);
+      migration.from=from||null;
+      if(from&&from<SCHEMA_VERSION){
+        var upgraded=deepClone(raw);
+        upgraded._schema=SCHEMA_VERSION;
+        upgraded._stateVersion=STORY_STATE_VERSION;
+        migration.applied.push('schema:'+from+'->'+SCHEMA_VERSION);
+        return{state:upgraded,migration:migration};
+      }
+      if(from&&from>SCHEMA_VERSION){migration.applied.push('schema:future');return{state:raw,migration:migration};}
+      migration.applied.push('schema:current');
+      return{state:raw,migration:migration};
+    }
+    if(raw.project||raw.worldbuilding||raw.timelines||raw.foreshadows){
+      migration.from='legacy-novelcraft';migration.applied.push('migrateFromNC');
+      return{state:migrateFromNC(raw),migration:migration};
+    }
+    if(raw.title!==undefined&&Array.isArray(raw.chapters)){
+      migration.from='legacy-wensi';migration.applied.push('migrateFromWensi');
+      return{state:migrateFromWensi(raw),migration:migration};
+    }
+    migration.from='unknown';migration.applied.push('adopt:as-is');
+    return{state:raw,migration:migration};
+  }
+
+  // validate: pure data contract check -> ValidationResult
+  function validateState(state,checkedAt){
+    var errors=[],warnings=[];
+    var now=typeof checkedAt==='number'?checkedAt:Date.now();
+    if(!isPlainObject(state))return{valid:false,errors:['state: expected plain object'],warnings:warnings,checkedAt:now};
+    if(asNumber(state._schema,0)>SCHEMA_VERSION)errors.push('state._schema '+state._schema+' is newer than supported '+SCHEMA_VERSION);
+    var fnPaths=collectFunctionPaths(state);
+    if(fnPaths.length)errors.push('state contains executable values at '+fnPaths.join(', '));
+    if(!isPlainObject(state.meta))errors.push('meta: expected object');
+    if(!isPlainObject(state.world))errors.push('world: expected object');
+    else{
+      if(!isPlainObject(state.world.setting))errors.push('world.setting: expected object');
+      ['locations','factions','rules'].forEach(function(k){if(!Array.isArray(state.world[k]))errors.push('world.'+k+': expected array');});
+    }
+    if(!isPlainObject(state.narrative_state))errors.push('narrative_state: expected object');
+    COLLECTIONS.forEach(function(key){
+      var list=state[key];
+      if(!Array.isArray(list)){errors.push(key+': expected array');return;}
+      var seen={};
+      list.forEach(function(item,idx){
+        if(!isPlainObject(item)){errors.push(key+'['+idx+']: expected object');return;}
+        if(typeof item.id!=='string'||!item.id){errors.push(key+'['+idx+'].id: missing');return;}
+        if(seen[item.id])errors.push(key+': duplicate id '+item.id);else seen[item.id]=true;
+      });
+    });
+    var charIds={};
+    asArray(state.characters).forEach(function(c){if(c&&typeof c.id==='string')charIds[c.id]=true;});
+    asArray(state.relationships).forEach(function(r){
+      if(!isPlainObject(r))return;
+      if(r.fromId&&!charIds[r.fromId])errors.push('relationships['+r.id+'].fromId: unknown character '+r.fromId);
+      if(r.toId&&!charIds[r.toId])errors.push('relationships['+r.id+'].toId: unknown character '+r.toId);
+    });
+    asArray(state.characters).forEach(function(c){
+      if(!isPlainObject(c))return;
+      asArray(c.relations).forEach(function(r){if(r&&r.targetId&&!charIds[r.targetId])warnings.push('characters['+c.id+'].relations -> unknown character '+r.targetId);});
+    });
+    asArray(state.chapters).forEach(function(c){
+      if(!isPlainObject(c))return;
+      if(typeof c.wordCount!=='number'||c.wordCount<0||!isFinite(c.wordCount))errors.push('chapters['+c.id+'].wordCount: invalid');
+      if(!isPlainObject(c.aiAnalysis))errors.push('chapters['+c.id+'].aiAnalysis: expected object');
+    });
+    asArray(state.foreshadowing).forEach(function(f){
+      if(!isPlainObject(f))return;
+      if(typeof f.chapterPlaced!=='number'||f.chapterPlaced<0)errors.push('foreshadowing['+f.id+'].chapterPlaced: invalid');
+      if(typeof f.chapterExpected!=='number'||f.chapterExpected<0)errors.push('foreshadowing['+f.id+'].chapterExpected: invalid');
+    });
+    asArray(state.conflicts).forEach(function(c){if(isPlainObject(c)&&!Array.isArray(c.parties))errors.push('conflicts['+c.id+'].parties: expected array');});
+    return{valid:errors.length===0,errors:errors,warnings:warnings,checkedAt:now};
+  }
+
+  // structuredDiff: keyed-array aware, returns {changes:[{path,before,after,changeType}]}
+  function isKeyedArray(v){return Array.isArray(v)&&v.every(function(x){return isPlainObject(x)&&typeof x.id==='string';});}
+  function diffValue(before,after,path,out){
+    if(hashObj(before)===hashObj(after))return out;
+    if(isKeyedArray(before)&&isKeyedArray(after)){
+      var bMap={},aMap={};
+      before.forEach(function(x){bMap[x.id]=x;});
+      after.forEach(function(x){aMap[x.id]=x;});
+      Object.keys(bMap).forEach(function(id){if(!(id in aMap))out.push({path:path+'.'+id,before:bMap[id],after:null,changeType:'remove'});});
+      Object.keys(aMap).forEach(function(id){
+        if(!(id in bMap))out.push({path:path+'.'+id,before:null,after:aMap[id],changeType:'add'});
+        else diffValue(bMap[id],aMap[id],path+'.'+id,out);
+      });
+      return out;
+    }
+    if(isPlainObject(before)&&isPlainObject(after)){
+      var keys={};
+      Object.keys(before).forEach(function(k){keys[k]=1;});
+      Object.keys(after).forEach(function(k){keys[k]=1;});
+      Object.keys(keys).sort().forEach(function(k){diffValue(before[k],after[k],path+'.'+k,out);});
+      return out;
+    }
+    var bUndef=before===undefined,aUndef=after===undefined;
+    out.push({path:path,before:bUndef?null:before,after:aUndef?null:after,changeType:bUndef?'add':(aUndef?'remove':'update')});
+    return out;
+  }
+  function structuredDiff(before,after){
+    var changes=diffValue(isPlainObject(before)?before:{},isPlainObject(after)?after:{},'',[]);
+    changes.forEach(function(c){if(c.path.charAt(0)==='.')c.path=c.path.slice(1);});
+    changes.sort(function(a,b){return a.path<b.path?-1:(a.path>b.path?1:0);});
+    return{changes:changes};
+  }
+
+  // Controlled path access (the only write path used by ChangeSet apply)
+  function collectionOfPath(path){
+    var seg=asString(path,'').split('.');
+    if(seg[0]==='world'&&seg[1]==='locations')return{key:'world.locations',prefix:'location'};
+    if(COLLECTIONS.indexOf(seg[0])>=0)return{key:seg[0],prefix:ID_PREFIX[seg[0]]};
+    return null;
+  }
+  function listOfCollection(key){
+    if(key==='world.locations')return _state.world.locations;
+    return _state[key];
+  }
+  function valueAtPath(path){
+    var col=collectionOfPath(path);
+    if(!col)return undefined;
+    var list=listOfCollection(col.key);
+    var seg=asString(path,'').split('.');
+    var rest=(col.key==='world.locations')?seg.slice(2):seg.slice(1);
+    if(rest.length===0)return deepClone(list);
+    var item=asArray(list).find(function(x){return x&&x.id===rest[0];});
+    if(!item)return undefined;
+    var cur=item;
+    for(var i=1;i<rest.length;i++){if(cur===undefined||cur===null)return undefined;cur=cur[rest[i]];}
+    return cur===undefined?undefined:deepClone(cur);
+  }
+  function rebuildRelationshipMirror(){
+    var byFrom={};
+    _state.relationships.forEach(function(r){if(!byFrom[r.fromId])byFrom[r.fromId]=[];byFrom[r.fromId].push({targetId:r.toId,type:r.type});});
+    _state.characters.forEach(function(c){c.relations=byFrom[c.id]?byFrom[c.id].slice():[];});
+  }
+  function applyChangeToState(change){
+    if(!isPlainObject(change))return{ok:false,errors:['change: expected object']};
+    var path=asString(change.path,'');
+    var changeType=asString(change.changeType===undefined?change.type:change.changeType,'update');
+    if(CHANGE_TYPES.indexOf(changeType)<0)return{ok:false,errors:['changeType: unknown '+changeType]};
+    var col=collectionOfPath(path);
+    if(!col)return{ok:false,errors:['path: unsupported '+path]};
+    var list=listOfCollection(col.key);
+    if(!Array.isArray(list))return{ok:false,errors:['path: collection '+col.key+' is not an array']};
+    var seg=path.split('.');
+    var rest=(col.key==='world.locations')?seg.slice(2):seg.slice(1);
+    if(changeType==='add'){
+      var entity=deepClone(change.after);
+      if(!isPlainObject(entity))return{ok:false,errors:['add: after must be an object']};
+      if(typeof entity.id!=='string'||!entity.id)entity.id=nextEntityId(col.prefix,list);
+      if(list.some(function(x){return x&&x.id===entity.id;}))return{ok:false,errors:['add: id exists '+entity.id]};
+      list.push(entity);
+      if(col.key==='relationships')rebuildRelationshipMirror();
+      if(col.key==='conflicts'&&_state.narrative_state.activeConflicts.indexOf(entity.id)<0)_state.narrative_state.activeConflicts.push(entity.id);
+      return{ok:true,changeType:'add',path:path,applied:entity};
+    }
+    var targetId=rest[0];
+    var idx=asArray(list).findIndex(function(x){return x&&x.id===targetId;});
+    if(idx<0)return{ok:false,errors:['target not found: '+targetId]};
+    if(changeType==='remove'){
+      var removed=list[idx];
+      list.splice(idx,1);
+      if(col.key==='conflicts')_state.narrative_state.activeConflicts=_state.narrative_state.activeConflicts.filter(function(id){return id!==removed.id;});
+      if(col.key==='relationships')rebuildRelationshipMirror();
+      return{ok:true,changeType:'remove',path:path};
+    }
+    if(rest.length<2)return{ok:false,errors:['update: path must be <collection>.<id>.<field>']};
+    var fields=rest.slice(1);
+    if(fields[0]==='id')return{ok:false,errors:['update: id is immutable']};
+    var target=list[idx];
+    var cursor=target;
+    for(var i=0;i<fields.length-1;i++){
+      if(!isPlainObject(cursor[fields[i]]))cursor[fields[i]]={};
+      cursor=cursor[fields[i]];
+    }
+    cursor[fields[fields.length-1]]=deepClone(change.after);
+    if(col.key==='foreshadowing'&&fields[0]==='status'){
+      _state.narrative_state.pendingForeshadows=_state.foreshadowing.filter(function(f){return f.status==='pending';}).map(function(f){return f.id;});
+    }
+    if(col.key==='relationships')rebuildRelationshipMirror();
+    return{ok:true,changeType:'update',path:path};
+  }
 
   function migrateFromNC(oldD){
     var s=createEmptyState();
@@ -200,24 +573,44 @@ var StoryStore=(function(){
     return s;
   }
 
+  // Phase 5.1 import pipeline: parse -> migration -> normalization -> validation -> commit
+  function pipelineFromRaw(raw){
+    var mig=migrateState(raw);
+    var norm=normalize(mig.state);
+    var validation=validateState(norm.state);
+    return{ok:validation.valid,migration:mig.migration,normalized:norm.state,
+      normalizationWarnings:norm.warnings||[],validation:validation};
+  }
+  function commitRaw(raw){
+    var r=pipelineFromRaw(raw);
+    if(!r.ok)return{ok:false,stage:'validate',errors:r.validation.errors,warnings:r.validation.warnings,migration:r.migration};
+    _state=r.normalized;
+    persist();
+    return{ok:true,migration:r.migration,warnings:(r.validation.warnings||[]).concat(r.normalizationWarnings||[])};
+  }
+
   function load(){
     try{
       var raw=localStorage.getItem(STORAGE_KEY);
       if(raw){
-        _state=JSON.parse(raw);
-        var d=createEmptyState();
-        for(var k in d)if(!(k in _state))_state[k]=d[k];
-        if(!_state._schema||_state._schema<SCHEMA_VERSION){
-          _state._schema=SCHEMA_VERSION;
-          _state._stateVersion=STORY_STATE_VERSION;
-          persist();
-        }
-        return;
+        var res=commitRaw(JSON.parse(raw));
+        if(res.ok)return;
+        console.error('[StoryStore] load: stored state failed validation, keeping empty state',res.errors);
       }
       var oldNC=localStorage.getItem(OLD_NC_KEY);
-      if(oldNC){var oldD=JSON.parse(oldNC);_state=migrateFromNC(oldD);persist();return;}
+      if(oldNC){
+        var resNC=commitRaw(JSON.parse(oldNC));
+        if(resNC.ok)return;
+      }
       var oldWensi=localStorage.getItem(OLD_WENSI_KEY);
-      if(oldWensi){var books=JSON.parse(oldWensi);var book=Array.isArray(books)&&books.length>0?books[0]:null;if(book&&book.data){_state=migrateFromWensi(book.data);persist();return;}}
+      if(oldWensi){
+        var books=JSON.parse(oldWensi);
+        var book=Array.isArray(books)&&books.length>0?books[0]:null;
+        if(book&&book.data){
+          var resW=commitRaw(book.data);
+          if(resW.ok)return;
+        }
+      }
     }catch(e){console.error('[StoryStore] load error:',e);}
     _state=createEmptyState();
   }
@@ -266,19 +659,55 @@ var StoryStore=(function(){
     addOutline:function(data){if(!_state.world.outlines)_state.world.outlines=[];var o={id:uid(),title:data.title||'',content:data.content||'',parentId:data.parentId||null,level:data.level||1};_state.world.outlines.push(o);persist();return o;},
     updateOutline:function(id,patch){if(!_state.world.outlines)return null;var o=_state.world.outlines.find(function(x){return x.id===id;});if(!o)return null;for(var k in patch)if(k!=='id')o[k]=patch[k];persist();return o;},
     deleteOutline:function(id){if(!_state.world.outlines)return false;_state.world.outlines=_state.world.outlines.filter(function(x){return x.id!==id;});persist();return true;},
+    // Relationships (Phase 5.1 top-level collection; mirrored into characters[].relations)
+    getRelationships:function(){return _state.relationships;},
+    addRelationship:function(data){data=data||{};var r={id:data.id||nextEntityId('relationship',_state.relationships),fromId:asString(data.fromId,''),toId:asString(data.toId,''),type:asString(data.type,''),note:asString(data.note,'')};_state.relationships.push(r);rebuildRelationshipMirror();persist();return r;},
+    updateRelationship:function(id,patch){var r=_state.relationships.find(function(x){return x.id===id;});if(!r)return null;for(var k in patch)if(k!=='id')r[k]=patch[k];rebuildRelationshipMirror();persist();return r;},
+    deleteRelationship:function(id){var idx=_state.relationships.findIndex(function(x){return x.id===id;});if(idx<0)return false;_state.relationships.splice(idx,1);rebuildRelationshipMirror();persist();return true;},
     // State Management
-    snapshot:function(){return deepClone(_state);},
-    rollback:function(snap){_state=deepClone(snap);persist();},
+    snapshot:function(){return normalize(deepClone(_state)).state;},
+    rollback:function(snap){
+      var norm=normalize(snap);
+      var validation=validateState(norm.state);
+      if(!validation.valid)return{ok:false,errors:validation.errors,warnings:validation.warnings};
+      _state=norm.state;
+      persist();
+      return{ok:true,errors:[],warnings:(validation.warnings||[]).concat(norm.warnings||[])};
+    },
     diff:function(before,after){var changes={};var keys=Object.keys(after);keys.forEach(function(k){if(JSON.stringify(before[k])!==JSON.stringify(after[k]))changes[k]={before:before[k],after:after[k]};});return changes;},
-    hash:function(obj){var str=JSON.stringify(obj);var h=5381;for(var i=0;i<str.length;i++){h=((h<<5)+h)+str.charCodeAt(i);h=h&0xFFFFFFFF;}return(h>>>0).toString(16);},
+    structuredDiff:structuredDiff,
+    hash:function(obj){return hashObj(obj);},
+    // Schema (Phase 5.1)
+    normalize:function(input){return normalize(input).state;},
+    normalizeReport:function(input){return normalize(input);},
+    migrate:function(raw){return migrateState(raw);},
+    validate:function(state,checkedAt){return validateState(state===undefined?_state:state,checkedAt);},
+    applyChange:applyChangeToState,
+    valueAtPath:valueAtPath,
+    nextId:function(collection,reservedIds){
+      var col=collectionOfPath(collection+'.x');if(!col)return null;
+      var list=listOfCollection(col.key).slice();
+      (reservedIds||[]).forEach(function(id){list.push({id:id});});
+      return nextEntityId(col.prefix,list);
+    },
     // Narrative State
     getNarrativeState:function(){return _state.narrative_state;},
     setNarrativeState:function(key,val){_state.narrative_state[key]=val;persist();},
+    // Auditable change ledger (inside StoryState: no second data source)
+    getChangeLedger:function(){return _state.narrative_state.changeLedger||[];},
+    appendChangeLedger:function(entry){if(!_state.narrative_state.changeLedger)_state.narrative_state.changeLedger=[];_state.narrative_state.changeLedger.push(deepClone(entry));persist();return entry;},
+    clearChangeLedger:function(){_state.narrative_state.changeLedger=[];persist();},
+    // Parse cache (controlled write path; replaces direct StoryStore.state writes)
+    setLastParseResult:function(result){_state._lastParseResult=deepClone(result);persist();return _state._lastParseResult;},
     // Persistence
     load:load,persist:persist,
-    // Export
+    // Export / Import (Phase 5.1: parse -> migration -> normalization -> validation -> commit)
     exportJSON:function(){return JSON.stringify(_state,null,2);},
-    importJSON:function(jsonStr){_state=JSON.parse(jsonStr);persist();},
+    importJSON:function(jsonStr){
+      var parsed;
+      try{parsed=JSON.parse(jsonStr);}catch(e){return{ok:false,stage:'parse',errors:['JSON parse error: '+e.message]};}
+      return commitRaw(parsed);
+    },
     // Reset
     reset:function(){_state=createEmptyState();persist();}
   };
@@ -319,7 +748,7 @@ var StoryEngine={
   },
   syncFromChapter:function(content,chapterIdx){
     var parseResult=this.parseText(content);
-    StoryStore.state._lastParseResult=parseResult;
+    StoryStore.setLastParseResult(parseResult);
     var ch=StoryStore.getChapterByIdx(chapterIdx);
     if(ch){
       ch.aiAnalysis={
@@ -349,6 +778,121 @@ var StoryEngine={
     StoryStore.persist();
     // [StoryEngine] parse complete
     return parseResult;
+  },
+  // ===== Phase 5.1: parse-only proposal. Never writes StoryState. =====
+  proposeChapterChanges:function(content,chapterIdx,options){
+    var chapter=StoryStore.getChapterByIdx(chapterIdx);
+    if(!chapter)return null;
+    var text=content||'';
+    var parsed=this.parseText(text);
+    var createdAt=(options&&typeof options.now==='number')?options.now:Date.now();
+    var drafts=[];
+
+    function evidenceFor(needle){
+      var s=String(needle||'');
+      var idx=text.indexOf(s);
+      var start=idx<0?0:idx;
+      return StoryContract.makeEvidence('chapter',chapter.id,start,start+s.length,text.substr(start,s.length));
+    }
+    function targetOf(entityType,entityId,displayName){
+      return{entityType:entityType,entityId:entityId,displayName:displayName||''};
+    }
+
+    // 1) chapter.aiAnalysis
+    var beforeAnalysis=StoryStore.valueAtPath('chapters.'+chapter.id+'.aiAnalysis');
+    var afterAnalysis={
+      characters:parsed.characters.map(function(c){return c.name;}),
+      locations:Array.from(new Set(parsed.locations)),
+      events:Array.from(new Set(parsed.events)),
+      foreshadowHits:parsed.foreshadows.map(function(f){return f.content;}),
+      emotions:parsed.emotions.slice(),
+      timeHints:parsed.timeHints.slice(),
+      lastParsed:createdAt
+    };
+    drafts.push({
+      actionId:'chapter:'+chapter.id+':aiAnalysis',
+      type:'update',
+      target:targetOf('chapter',chapter.id,chapter.title),
+      path:'chapters.'+chapter.id+'.aiAnalysis',
+      before:beforeAnalysis,
+      after:afterAnalysis,
+      reason:'章节解析：结构化标注（人物/地点/事件/伏笔/情绪/时间提示）',
+      evidence:[StoryContract.makeEvidence('chapter',chapter.id,0,text.length,text.slice(0,80))]
+    });
+
+    // 2) existing character presence (idempotent with legacy syncFromChapter semantics)
+    parsed.characters.forEach(function(pc){
+      if(pc.isNew)return;
+      var char=StoryStore.getCharacters().find(function(c){return c.name===pc.name;});
+      if(!char)return;
+      var beforePresence=StoryStore.valueAtPath('characters.'+char.id+'.presence')||{};
+      var afterPresence=JSON.parse(JSON.stringify(beforePresence));
+      afterPresence.chapterIds=Array.isArray(afterPresence.chapterIds)?afterPresence.chapterIds:[];
+      if(afterPresence.chapterIds.indexOf(chapterIdx)<0)afterPresence.chapterIds.push(chapterIdx);
+      if((afterPresence.lastAppear||0)<chapterIdx){
+        afterPresence.appearCount=(afterPresence.appearCount||0)+pc.count;
+        afterPresence.lastAppear=chapterIdx;
+      }
+      if(!afterPresence.firstAppear||afterPresence.firstAppear>chapterIdx)afterPresence.firstAppear=chapterIdx;
+      drafts.push({
+        actionId:'chapter:'+chapter.id+':presence:'+char.id,
+        type:'update',
+        target:targetOf('character',char.id,char.name),
+        path:'characters.'+char.id+'.presence',
+        before:beforePresence,
+        after:afterPresence,
+        reason:'章节解析：角色出场统计',
+        evidence:[evidenceFor(pc.name)]
+      });
+    });
+
+    // 3) new characters (deterministic ids, no randomness)
+    var reservedCharIds=[];
+    parsed.characters.forEach(function(pc){
+      if(!pc.isNew)return;
+      if(StoryStore.getCharacters().some(function(c){return c.name===pc.name;}))return;
+      var id=StoryStore.nextId('characters',reservedCharIds);
+      if(!id)return;
+      reservedCharIds.push(id);
+      drafts.push({
+        actionId:'chapter:'+chapter.id+':character:add:'+pc.name,
+        type:'add',
+        target:targetOf('character',id,pc.name),
+        path:'characters.'+id,
+        before:null,
+        after:{id:id,name:pc.name,gender:'',age:'',charType:'supporting',tags:[],fields:{},relations:[],
+          presence:{firstAppear:chapterIdx,lastAppear:chapterIdx,chapterIds:[chapterIdx],appearCount:pc.count||1},
+          aiProfile:{arcStage:'',consistencyScore:100,importance:5}},
+        reason:'章节解析：发现新角色',
+        evidence:[evidenceFor(pc.name)]
+      });
+    });
+
+    // 4) new foreshadowing entities from [[伏笔:...]] markers
+    var reservedFsIds=[];
+    parsed.foreshadows.forEach(function(f){
+      if(StoryStore.getForeshadows().some(function(x){return x.content===f.content;}))return;
+      var id=StoryStore.nextId('foreshadowing',reservedFsIds);
+      if(!id)return;
+      reservedFsIds.push(id);
+      drafts.push({
+        actionId:'chapter:'+chapter.id+':foreshadow:add:'+f.content,
+        type:'add',
+        target:targetOf('foreshadow',id,f.content),
+        path:'foreshadowing.'+id,
+        before:null,
+        after:{id:id,content:f.content,chapterPlaced:chapterIdx,chapterExpected:0,status:'pending',note:'',linkedChapterId:null},
+        reason:'章节解析：发现伏笔标记',
+        evidence:[evidenceFor(f.raw||f.content)]
+      });
+    });
+
+    return ChangeSetRuntime.propose({
+      source:'StoryEngine.proposeChapterChanges',
+      operation:'parse_chapter',
+      changes:drafts,
+      baseStateHash:StoryStore.hash(StoryStore.state)
+    },{now:createdAt});
   }
 };
 
@@ -437,6 +981,17 @@ var AIRuntime=(function(){
     _computeDecisionHash:function(decision,stateSig){return decision.action+'_'+(decision.target||'null')+'_'+stateSig;},
     _getStateSignature:function(s){return's'+s.chapters.length+'_c'+s.conflicts.length+'_f'+s.foreshadowing.length+'_ch'+s.characters.length;},
     resetExecutedHashes:function(){this._executedHashes={};},
+    // Phase 5.1: apply a ChangeSet through the controlled StoryStore write path
+    applyChangeSet:function(changeSet){
+      var results=[];
+      var changes=(changeSet&&changeSet.changes)||[];
+      changes.forEach(function(change){
+        var r=StoryStore.applyChange(change);
+        results.push({path:change.path,changeType:change.type,ok:!!(r&&r.ok),errors:(r&&r.errors)||[]});
+      });
+      StoryStore.persist();
+      return results;
+    },
     execute:function(decisions){
       var results=[];var s=StoryStore.state;var stateSig=this._getStateSignature(s);var self=this;
       decisions.sort(function(a,b){return b.priority-a.priority;});
@@ -573,8 +1128,14 @@ var AIRuntime=(function(){
     ActionPlan:ActionPlanSystem,
     analyze:function(chapterIdx){return ActionPlanSystem.analyze(chapterIdx);},
     execute:function(decisions){return AIExecutionLayer.execute(decisions);},
-    run:function(chapterIdx){var a=this.analyze(chapterIdx);var snap=StoryStateManager.snapshot();var exec=AIExecutionLayer.execute(a.decisions);StoryStore.state.narrative_state.lastAnalysis=1;return{analysis:a,executed:exec,timestamp:0,snapshotHash:StoryStateManager.hash(snap)};},
+    run:function(chapterIdx){var a=this.analyze(chapterIdx);var snap=StoryStateManager.snapshot();var exec=AIExecutionLayer.execute(a.decisions);StoryStore.setNarrativeState('lastAnalysis',1);return{analysis:a,executed:exec,timestamp:0,snapshotHash:StoryStateManager.hash(snap)};},
     runActionPlan:function(chapterIdx){return ActionPlanSystem.runFull(chapterIdx);},
+    // ===== Phase 5.1: ChangeSet lifecycle (Proposal -> Validation -> Approval -> Apply -> Verify) =====
+    proposeChangeSet:function(input,options){return ChangeSetRuntime.propose(input,options);},
+    validateChangeSet:function(changeSet,options){return ChangeSetRuntime.validate(changeSet,options);},
+    approveChangeSet:function(changeSet,approver,options){return ChangeSetRuntime.approve(changeSet,approver,options);},
+    rejectChangeSet:function(changeSet,reason,options){return ChangeSetRuntime.reject(changeSet,reason,options);},
+    applyChangeSet:function(changeSet,options){return ChangeSetRuntime.apply(changeSet,options);},
     _injectTestState:injectTestState,
     _restoreState:restoreState,
     // Scene A: Empty story
@@ -659,10 +1220,542 @@ var AIRuntime=(function(){
       StoryStore.persist();
       var raw=localStorage.getItem('novelcraft_unified_v1');
       results.push({id:10,name:'localStorage数据可恢复',pass:!!raw&&JSON.parse(raw).meta!==undefined});
+
+      // ===== Phase 5.1 tests (11-34) =====
+      function t(id,name,pass){results.push({id:id,name:name,pass:!!pass});}
+      function withState(partial,fn){
+        var orig=injectTestState(partial||{});
+        var out;
+        try{out=fn();}finally{restoreState(orig);}
+        return out;
+      }
+
+      // Test 11-12: normalization + idempotence
+      var normReport=StoryStore.normalizeReport({meta:{title:'N'},chapters:'not-an-array',
+        characters:[{name:'甲'},{name:'乙'}]});
+      var nstate=normReport.state;
+      t(11,'schema normalization 补齐与纠正',
+        Array.isArray(nstate.chapters)&&nstate.chapters.length===0&&nstate.characters.length===2&&
+        nstate.characters[0].id==='character_001'&&nstate.characters[1].id==='character_002'&&
+        Array.isArray(nstate.relationships)&&Array.isArray(nstate.narrative_state.changeLedger)&&
+        nstate.meta.genre==='fantasy'&&normReport.warnings.length>0);
+      var nstate2=StoryStore.normalize(nstate);
+      t(12,'normalize 幂等（同输入同输出）',StoryStore.hash(nstate2)===StoryStore.hash(nstate));
+
+      // Test 13-14: migration
+      var migNC=StoryStore.migrate({project:{name:'旧项目',genre:'xianxia'},
+        chapters:[{title:'章一',content:'张三'}],characters:[{name:'张三'}]});
+      t(13,'schema migration: legacy NovelCraft',
+        migNC.migration.from==='legacy-novelcraft'&&migNC.state.meta.title==='旧项目'&&migNC.state.chapters.length===1);
+      var migW=StoryStore.migrate({title:'文思书',chapters:[{id:'w1',title:'一',content:'x'}]});
+      var migSchema=StoryStore.migrate({_schema:1,_stateVersion:'v1',meta:{title:'旧 schema'}});
+      t(14,'schema migration: legacy Wensi / schema 升级',
+        migW.migration.from==='legacy-wensi'&&migSchema.migration.applied.indexOf('schema:1->2')>=0&&
+        migSchema.state._schema===SCHEMA_VERSION);
+
+      // Test 15: valid import (5-step pipeline commits)
+      var importOk=withState({chapters:[{id:'keep',title:'保留章',content:'保留'}]},function(){
+        var res=StoryStore.importJSON(JSON.stringify({meta:{title:'导入成功'},
+          chapters:[{id:'c1',title:'第一章',content:'张三走进客栈',wordCount:10}],
+          characters:[{id:'p1',name:'张三'}]}));
+        var st=StoryStore.state;
+        return res.ok&&st.meta.title==='导入成功'&&st.chapters.length===1&&st.characters.length===1&&
+          Array.isArray(st.relationships)&&st._schema===SCHEMA_VERSION;
+      });
+      t(15,'valid import 通过五步管线并提交',importOk);
+
+      // Test 16-17: invalid import must not overwrite current state
+      var importBadJson=withState({chapters:[{id:'keep',title:'保留章',content:'保留'}]},function(){
+        var h=StoryStore.hash(StoryStore.state);
+        var res=StoryStore.importJSON('{not-json');
+        return !res.ok&&res.stage==='parse'&&StoryStore.hash(StoryStore.state)===h&&!!StoryStore.getChapter('keep');
+      });
+      t(16,'invalid import: JSON 解析失败不改状态',importBadJson);
+      var importBadShape=withState({chapters:[{id:'keep',title:'保留章',content:'保留'}]},function(){
+        var h=StoryStore.hash(StoryStore.state);
+        var res=StoryStore.importJSON(JSON.stringify({_schema:99,_stateVersion:'future',meta:{},chapters:[]}));
+        return !res.ok&&res.stage==='validate'&&StoryStore.hash(StoryStore.state)===h&&!!StoryStore.getChapter('keep');
+      });
+      t(17,'invalid import: 校验失败不改状态',importBadShape);
+
+      // Test 18: malformed nested data
+      var malformed=StoryStore.normalize({chapters:[{id:'c1',title:123,wordCount:'abc',aiAnalysis:null},'not-an-object'],
+        characters:[{id:'dup',name:'A'},{id:'dup',name:'B'}],
+        world:{locations:'nope'},
+        foreshadowing:[{id:'f1',content:'玉佩',chapterPlaced:'x',chapterExpected:-1}],
+        narrative_state:null});
+      t(18,'malformed nested data 被规范化',
+        malformed.chapters.length===2&&typeof malformed.chapters[0].title==='string'&&
+        malformed.chapters[0].wordCount===0&&malformed.chapters[0].aiAnalysis.characters.length===0&&
+        malformed.characters[1].id!=='dup'&&Array.isArray(malformed.world.locations)&&malformed.world.locations.length===0&&
+        malformed.foreshadowing[0].chapterPlaced===0&&malformed.narrative_state.changeLedger.length===0);
+
+      // Test 19-21: structuredDiff add / remove / update
+      var sdiff=StoryStore.structuredDiff(
+        {characters:[{id:'c1',name:'甲',age:'1'}],foreshadowing:[{id:'f1',status:'pending'}]},
+        {characters:[{id:'c1',name:'甲',age:'2'},{id:'c2',name:'乙'}],foreshadowing:[]});
+      var sdByPath={};
+      sdiff.changes.forEach(function(c){sdByPath[c.path]=c;});
+      t(19,'structuredDiff: update 路径为 collection.id.field',
+        !!sdByPath['characters.c1.age']&&sdByPath['characters.c1.age'].changeType==='update'&&sdByPath['characters.c1.age'].after==='2');
+      t(20,'structuredDiff: add',!!sdByPath['characters.c2']&&sdByPath['characters.c2'].changeType==='add'&&sdByPath['characters.c2'].before===null);
+      t(21,'structuredDiff: remove',!!sdByPath['foreshadowing.f1']&&sdByPath['foreshadowing.f1'].changeType==='remove'&&sdByPath['foreshadowing.f1'].after===null);
+
+      // Test 22: path shape for the documented collections
+      var sdPaths=StoryStore.structuredDiff(
+        {chapters:[{id:'chapter_003',wordCount:1}],foreshadowing:[{id:'foreshadow_002',status:'pending'}]},
+        {chapters:[{id:'chapter_003',wordCount:2}],foreshadowing:[{id:'foreshadow_002',status:'resolved'}]})
+        .changes.map(function(c){return c.path;}).sort().join(',');
+      t(22,'structuredDiff 覆盖 chapters/foreshadowing 路径',
+        sdPaths==='chapters.chapter_003.wordCount,foreshadowing.foreshadow_002.status');
+
+      // Test 23: snapshot integrity (deep copy + normalized)
+      var snapOk=withState({characters:[{id:'c1',name:'甲'}]},function(){
+        var snap=StoryStore.snapshot();
+        StoryStore.getCharacters()[0].name='被改';
+        return snap.characters[0].name==='甲'&&StoryStore.hash(snap)===StoryStore.hash(StoryStore.normalize(snap));
+      });
+      t(23,'snapshot 不共享引用且已规范化',snapOk);
+
+      // Test 24: rollback integrity (atomic replace / no pollution on failure)
+      var rollbackOk=withState({characters:[{id:'c1',name:'甲'}]},function(){
+        var snap=StoryStore.snapshot();
+        StoryStore.getCharacters()[0].name='乙';
+        var r=StoryStore.rollback(snap);
+        var restored=r.ok&&StoryStore.getCharacter('c1').name==='甲';
+        var h=StoryStore.hash(StoryStore.state);
+        var bad=StoryStore.rollback({_schema:99,characters:'nope'});
+        return restored&&!bad.ok&&StoryStore.hash(StoryStore.state)===h;
+      });
+      t(24,'rollback 原子替换 / 失败不污染',rollbackOk);
+
+      // Test 25: ChangeSet validation -> VALID
+      var csValid=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'validate',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'21',reason:'年龄增长'}]});
+        var v=ChangeSetRuntime.validate(cs,{now:1});
+        return v.ok&&cs.status==='VALID'&&cs.errors.length===0&&StoryContract.validateChangeSet(cs,1).valid;
+      });
+      t(25,'ChangeSet validation → VALID',csValid);
+
+      // Test 26: full chain PROPOSED -> ... -> VERIFIED
+      var csApply=withState({characters:[{id:'c1',name:'甲',age:'20'}],
+        foreshadowing:[{id:'f1',content:'玉佩',chapterPlaced:0,chapterExpected:1,status:'pending'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'apply',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'21',reason:'年龄增长'},
+          {actionId:'a2',type:'update',target:{entityType:'foreshadow',entityId:'f1',displayName:'玉佩'},
+           path:'foreshadowing.f1.status',before:'pending',after:'resolved',reason:'伏笔回收'}]});
+        ChangeSetRuntime.validate(cs,{now:2});
+        ChangeSetRuntime.approve(cs,'author',{now:3});
+        var res=AIRuntime.applyChangeSet(cs,{now:4});
+        return res.ok&&cs.status==='VERIFIED'&&StoryStore.getCharacter('c1').age==='21'&&
+          StoryStore.getForeshadow('f1').status==='resolved'&&StoryStore.getChangeLedger().length===1&&
+          res.verification.valid&&StoryStore.getNarrativeState().pendingForeshadows.indexOf('f1')<0;
+      });
+      t(26,'ChangeSet apply: APPROVED→APPLIED→VERIFIED',csApply);
+
+      // Test 27: rejection blocks apply
+      var csReject=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'reject',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'99',reason:'x'}]});
+        ChangeSetRuntime.validate(cs,{now:5});
+        ChangeSetRuntime.reject(cs,'作者拒绝',{now:6});
+        var res=ChangeSetRuntime.apply(cs,{now:7});
+        return cs.status==='REJECTED'&&!res.ok&&res.errors.indexOf('changeset_not_approved')>=0&&
+          StoryStore.getCharacter('c1').age==='20';
+      });
+      t(27,'ChangeSet rejection 后不能 apply',csReject);
+
+      // Test 28: invalid ChangeSet cannot apply and cannot change state
+      var csInvalid=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'invalid',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'30',reason:'x'}]});
+        ChangeSetRuntime.validate(cs,{now:8});
+        ChangeSetRuntime.approve(cs,'author',{now:9});
+        cs.changes[0].type='explode';
+        var h=StoryStore.hash(StoryStore.state);
+        var res=ChangeSetRuntime.apply(cs,{now:10});
+        return !res.ok&&cs.status==='REJECTED'&&StoryStore.hash(StoryStore.state)===h&&
+          StoryStore.getCharacter('c1').age==='20'&&StoryStore.getChangeLedger().length===0;
+      });
+      t(28,'invalid ChangeSet 不能 apply 且状态不变',csInvalid);
+
+      // Test 29: duplicate ChangeSet is not applied twice
+      var csDup=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'dup',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'22',reason:'x'}]});
+        ChangeSetRuntime.validate(cs,{now:11});
+        ChangeSetRuntime.approve(cs,'author',{now:12});
+        var first=ChangeSetRuntime.apply(cs,{now:13});
+        var h=StoryStore.hash(StoryStore.state);
+        var second=ChangeSetRuntime.apply(cs,{now:14});
+        return first.ok&&!second.ok&&second.errors.indexOf('duplicate_changeset')>=0&&
+          StoryStore.hash(StoryStore.state)===h&&StoryStore.getChangeLedger().length===1;
+      });
+      t(29,'duplicate ChangeSet 不重复执行',csDup);
+
+      // Test 30: stale ChangeSet cannot overwrite newer state
+      var csStale=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'stale',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'20',after:'23',reason:'x'}]});
+        ChangeSetRuntime.validate(cs,{now:15});
+        ChangeSetRuntime.approve(cs,'author',{now:16});
+        StoryStore.updateCharacter('c1',{age:'30'});
+        var res=ChangeSetRuntime.apply(cs,{now:17});
+        var errs=res.errors.join(',');
+        return !res.ok&&(errs.indexOf('stale_changeset')>=0||errs.indexOf('precondition_failed')>=0)&&
+          StoryStore.getCharacter('c1').age==='30'&&StoryStore.getChangeLedger().length===0;
+      });
+      t(30,'stale ChangeSet 不能覆盖新状态',csStale);
+
+      // Test 31: before mismatch rejects execution
+      var csPre=withState({characters:[{id:'c1',name:'甲',age:'20'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'precondition',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.age',before:'19',after:'21',reason:'x'}]});
+        ChangeSetRuntime.validate(cs,{now:18});
+        ChangeSetRuntime.approve(cs,'author',{now:19});
+        var res=ChangeSetRuntime.apply(cs,{now:20});
+        return !res.ok&&res.errors.join(',').indexOf('precondition_failed')>=0&&StoryStore.getCharacter('c1').age==='20';
+      });
+      t(31,'before 不匹配时拒绝执行',csPre);
+
+      // Test 32: proposeChapterChanges separates parsing from writing
+      var parseSep=withState({chapters:[{id:'c1',title:'第一章',content:'',wordCount:0}],
+        characters:[{id:'p1',name:'张三'}]},function(){
+        var text='张三走进客栈，与人厮杀。[[伏笔:玉佩]]';
+        var h=StoryStore.hash(StoryStore.state);
+        var cs=StoryEngine.proposeChapterChanges(text,0,{now:100});
+        return !!cs&&cs.status==='PROPOSED'&&cs.changes.length>0&&
+          StoryStore.hash(StoryStore.state)===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(32,'proposeChapterChanges 只提议不写入',parseSep);
+
+      // Test 33: deterministic ChangeSet / StateChange ids
+      var idsDet=withState({chapters:[{id:'c1',title:'第一章',content:'',wordCount:0}],
+        characters:[{id:'p1',name:'张三'}]},function(){
+        var text='张三走进客栈。[[伏笔:玉佩]]';
+        var a=StoryEngine.proposeChapterChanges(text,0,{now:100});
+        var b=StoryEngine.proposeChapterChanges(text,0,{now:100});
+        return a.changeSetId===b.changeSetId&&a.changes.length===b.changes.length&&
+          a.changes[0].changeId===b.changes[0].changeId&&
+          a.changeSetId.indexOf('cs_')===0&&a.changes[0].changeId.indexOf('chg_')===0&&
+          CONTRACT_VERSION==='5.1';
+      });
+      t(33,'ChangeSet / StateChange ID 确定性',idsDet);
+
+      // Test 34: contracts must be pure data
+      var pureData=withState({characters:[{id:'c1',name:'甲'}]},function(){
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'pure',changes:[
+          {actionId:'a1',type:'update',target:{entityType:'character',entityId:'c1',displayName:'甲'},
+           path:'characters.c1.name',before:'甲',after:'乙',reason:'x'}]});
+        var accepts=StoryContract.validateChangeSet(cs,1).valid;
+        var bad=JSON.parse(JSON.stringify(cs));
+        bad.changes[0].after=function(){return 1;};
+        var rejects=!StoryContract.validateChangeSet(bad,1).valid;
+        var serializable=true;
+        try{JSON.parse(JSON.stringify(cs));}catch(e){serializable=false;}
+        return accepts&&rejects&&serializable;
+      });
+      t(34,'契约是纯数据（拒绝可执行代码）',pureData);
+
       return{results:results,allPass:results.every(function(r){return r.pass;})};
     }
   };
 })();
+
+// ===== Phase 5.1: Runtime Contracts (pure data only, no executable values) =====
+var CONTRACT_VERSION='5.1';
+var StoryContract=(function(){
+  var STATUS={PROPOSED:'PROPOSED',VALIDATING:'VALIDATING',VALID:'VALID',APPROVED:'APPROVED',
+    APPLIED:'APPLIED',VERIFIED:'VERIFIED',REJECTED:'REJECTED',FAILED:'FAILED'};
+  var STATUS_LIST=['PROPOSED','VALIDATING','VALID','APPROVED','APPLIED','VERIFIED','REJECTED','FAILED'];
+  var CHANGE_TYPES=['add','remove','update'];
+
+  function isPlainObject(v){return!!v&&typeof v==='object'&&!Array.isArray(v);}
+  function collectFunctionPaths(value,path,out){
+    out=out||[];path=path||'$';
+    if(typeof value==='function'){out.push(path);return out;}
+    if(Array.isArray(value)){value.forEach(function(v,i){collectFunctionPaths(v,path+'['+i+']',out);});return out;}
+    if(isPlainObject(value)){Object.keys(value).forEach(function(k){collectFunctionPaths(value[k],path+'.'+k,out);});return out;}
+    return out;
+  }
+  function deterministicId(prefix,payload){return prefix+'_'+StoryStore.hash(payload);}
+
+  // --- contract factories (pure data) ---
+  function makeEntityRef(entityType,entityId,displayName){
+    return{entityType:String(entityType||''),entityId:String(entityId||''),displayName:String(displayName||'')};
+  }
+  function makeEvidence(sourceType,sourceId,start,end,excerpt){
+    return{sourceType:String(sourceType||''),sourceId:String(sourceId||''),
+      start:(typeof start==='number'?start:0),end:(typeof end==='number'?end:0),excerpt:String(excerpt||'')};
+  }
+  function makeStateChange(fields){
+    fields=fields||{};
+    var t=fields.target||{};
+    return{
+      changeId:String(fields.changeId||''),
+      actionId:String(fields.actionId||''),
+      type:String(fields.type||'update'),
+      target:makeEntityRef(t.entityType,t.entityId,t.displayName),
+      path:String(fields.path||''),
+      before:(fields.before===undefined?null:fields.before),
+      after:(fields.after===undefined?null:fields.after),
+      reason:String(fields.reason||''),
+      evidence:(Array.isArray(fields.evidence)?fields.evidence:[]).map(function(e){
+        return makeEvidence(e&&e.sourceType,e&&e.sourceId,e&&e.start,e&&e.end,e&&e.excerpt);
+      }),
+      timestamp:(typeof fields.timestamp==='number'?fields.timestamp:0)
+    };
+  }
+  function makeChangeSet(fields){
+    fields=fields||{};
+    return{
+      changeSetId:String(fields.changeSetId||''),
+      source:String(fields.source||''),
+      operation:String(fields.operation||''),
+      changes:(Array.isArray(fields.changes)?fields.changes:[]).slice(),
+      createdAt:(typeof fields.createdAt==='number'?fields.createdAt:0),
+      status:String(fields.status||STATUS.PROPOSED),
+      baseStateHash:String(fields.baseStateHash||''),
+      approval:(fields.approval===undefined?null:fields.approval),
+      errors:(Array.isArray(fields.errors)?fields.errors:[]).slice(),
+      warnings:(Array.isArray(fields.warnings)?fields.warnings:[]).slice()
+    };
+  }
+  function makeValidationResult(valid,errors,warnings,checkedAt){
+    return{valid:!!valid,errors:(errors||[]).slice(),warnings:(warnings||[]).slice(),
+      checkedAt:(typeof checkedAt==='number'?checkedAt:0)};
+  }
+  function makeChangeSetId(source,operation,changes){
+    return deterministicId('cs',{source:String(source||''),operation:String(operation||''),
+      shape:(changes||[]).map(function(c){return{actionId:c.actionId,type:c.type,path:c.path};})});
+  }
+  function makeChangeId(changeSetId,path,index){return deterministicId('chg',changeSetId+'|'+path+'|'+index);}
+
+  // --- contract validation ---
+  function validateChangeSet(changeSet,checkedAt){
+    var errors=[],warnings=[];
+    if(!isPlainObject(changeSet))return makeValidationResult(false,['changeSet: expected plain object'],[],checkedAt);
+    if(typeof changeSet.changeSetId!=='string'||changeSet.changeSetId.indexOf('cs_')!==0)errors.push('changeSetId: must be a cs_ id');
+    if(!changeSet.source)errors.push('source: required');
+    if(!changeSet.operation)errors.push('operation: required');
+    if(!Array.isArray(changeSet.changes))errors.push('changes: expected array');
+    if(STATUS_LIST.indexOf(changeSet.status)<0)errors.push('status: unknown '+changeSet.status);
+    if(typeof changeSet.createdAt!=='number')errors.push('createdAt: expected number');
+    if(typeof changeSet.baseStateHash!=='string'||!changeSet.baseStateHash)warnings.push('baseStateHash: missing (stale detection disabled)');
+    var fnPaths=collectFunctionPaths(changeSet);
+    if(fnPaths.length)errors.push('changeSet: executable values at '+fnPaths.join(', '));
+    (changeSet.changes||[]).forEach(function(ch,idx){
+      var at='changes['+idx+']';
+      if(!isPlainObject(ch)){errors.push(at+': expected object');return;}
+      if(typeof ch.changeId!=='string'||ch.changeId.indexOf('chg_')!==0)errors.push(at+'.changeId: must be a chg_ id');
+      if(!ch.actionId)errors.push(at+'.actionId: required');
+      if(CHANGE_TYPES.indexOf(ch.type)<0)errors.push(at+'.type: must be add|remove|update');
+      if(!isPlainObject(ch.target)||!ch.target.entityType||!ch.target.entityId)errors.push(at+'.target: entityType and entityId required');
+      if(typeof ch.path!=='string'||ch.path.split('.').length<2)errors.push(at+'.path: must be a dotted path');
+      if(typeof ch.reason!=='string'||!ch.reason)warnings.push(at+'.reason: empty');
+      if(typeof ch.timestamp!=='number')errors.push(at+'.timestamp: expected number');
+      if(!('before' in ch)||!('after' in ch))errors.push(at+': before and after are required (may be null)');
+      if(!Array.isArray(ch.evidence))errors.push(at+'.evidence: expected array');
+      else ch.evidence.forEach(function(e,i){
+        if(!isPlainObject(e)){errors.push(at+'.evidence['+i+']: expected object');return;}
+        if(!e.sourceType)errors.push(at+'.evidence['+i+'].sourceType: required');
+        if(typeof e.sourceId!=='string')errors.push(at+'.evidence['+i+'].sourceId: expected string');
+        if(typeof e.start!=='number'||typeof e.end!=='number')errors.push(at+'.evidence['+i+']: start/end must be numbers');
+      });
+    });
+    return makeValidationResult(errors.length===0,errors,warnings,checkedAt);
+  }
+
+  return{
+    CONTRACT_VERSION:CONTRACT_VERSION,STATUS:STATUS,STATUS_LIST:STATUS_LIST,CHANGE_TYPES:CHANGE_TYPES,
+    makeEntityRef:makeEntityRef,makeEvidence:makeEvidence,makeStateChange:makeStateChange,
+    makeChangeSet:makeChangeSet,makeValidationResult:makeValidationResult,
+    makeChangeSetId:makeChangeSetId,makeChangeId:makeChangeId,
+    validateChangeSet:validateChangeSet,collectFunctionPaths:collectFunctionPaths
+  };
+})();
+
+// ===== Phase 5.1: ChangeSet lifecycle runtime =====
+var ChangeSetRuntime=(function(){
+  var S=StoryContract.STATUS;
+
+  function isPlainObject(v){return!!v&&typeof v==='object'&&!Array.isArray(v);}
+  function nowOf(options){return(options&&typeof options.now==='number')?options.now:Date.now();}
+  function currentStateHash(){return StoryStore.hash(StoryStore.state);}
+  function ledger(){return StoryStore.getChangeLedger();}
+  function isAlreadyApplied(changeSetId){
+    return ledger().some(function(e){return e.changeSetId===changeSetId&&(e.status===S.APPLIED||e.status===S.VERIFIED);});
+  }
+  function padIdx(n){var s=String(n);while(s.length<3)s='0'+s;return s;}
+
+  function propose(input,options){
+    input=input||{};
+    var createdAt=nowOf(options);
+    var shape=(input.changes||[]).map(function(c,idx){
+      return{
+        actionId:c.actionId||('action_'+padIdx(idx+1)),
+        type:c.type||'update',
+        target:c.target||{entityType:'state',entityId:'state',displayName:''},
+        path:c.path||'',
+        before:(c.before===undefined?null:c.before),
+        after:(c.after===undefined?null:c.after),
+        reason:c.reason||'',
+        evidence:c.evidence||[],
+        timestamp:(c.timestamp===undefined?createdAt:c.timestamp)
+      };
+    });
+    var changeSetId=StoryContract.makeChangeSetId(input.source||'',input.operation||'',shape);
+    var changes=shape.map(function(c,idx){
+      return StoryContract.makeStateChange({
+        changeId:StoryContract.makeChangeId(changeSetId,c.path,idx),
+        actionId:c.actionId,type:c.type,target:c.target,path:c.path,before:c.before,after:c.after,
+        reason:c.reason,evidence:c.evidence,timestamp:c.timestamp
+      });
+    });
+    return StoryContract.makeChangeSet({
+      changeSetId:changeSetId,source:input.source||'',operation:input.operation||'',changes:changes,
+      createdAt:createdAt,status:S.PROPOSED,baseStateHash:input.baseStateHash||currentStateHash()
+    });
+  }
+
+  function validate(changeSet,options){
+    var at=nowOf(options);
+    if(!isPlainObject(changeSet))return{ok:false,status:S.REJECTED,validation:StoryContract.makeValidationResult(false,['changeSet: expected object'],[],at)};
+    changeSet.status=S.VALIDATING;
+    var validation=StoryContract.validateChangeSet(changeSet,at);
+    var errors=validation.errors.slice(),warnings=validation.warnings.slice();
+    changeSet.warnings=warnings;
+    if(errors.length){
+      changeSet.status=S.REJECTED;changeSet.errors=errors;
+      return{ok:false,status:S.REJECTED,validation:StoryContract.makeValidationResult(false,errors,warnings,at)};
+    }
+    changeSet.errors=[];changeSet.status=S.VALID;
+    return{ok:true,status:S.VALID,validation:StoryContract.makeValidationResult(true,[],warnings,at)};
+  }
+
+  function approve(changeSet,approver,options){
+    if(!isPlainObject(changeSet))return{ok:false,status:null,errors:['changeSet: expected object']};
+    if(changeSet.status===S.PROPOSED){
+      var v=validate(changeSet,options);
+      if(!v.ok)return{ok:false,status:changeSet.status,errors:v.validation.errors};
+    }
+    if(changeSet.status!==S.VALID)return{ok:false,status:changeSet.status,errors:['approve: status must be VALID, got '+changeSet.status]};
+    changeSet.status=S.APPROVED;
+    changeSet.approval={approver:String(approver||'author'),approvedAt:nowOf(options)};
+    return{ok:true,status:S.APPROVED,errors:[]};
+  }
+
+  function reject(changeSet,reason,options){
+    if(!isPlainObject(changeSet))return{ok:false,status:null,errors:['changeSet: expected object']};
+    changeSet.status=S.REJECTED;
+    changeSet.rejection={reason:String(reason||''),rejectedAt:nowOf(options)};
+    return{ok:true,status:S.REJECTED,errors:[]};
+  }
+
+  function checkPreconditions(changeSet){
+    var failures=[];
+    (changeSet.changes||[]).forEach(function(ch){
+      if(ch.type==='add')return;
+      var current=StoryStore.valueAtPath(ch.path);
+      var expected=(ch.before===undefined?null:ch.before);
+      if(current===undefined&&expected===null)return;
+      if(StoryStore.hash(current)!==StoryStore.hash(expected))failures.push(ch.path);
+    });
+    return failures;
+  }
+
+  function verify(changeSet,before,after,options){
+    var errors=[],warnings=[];
+    var diff=StoryStore.structuredDiff(before,after);
+    var byPath={};
+    diff.changes.forEach(function(c){byPath[c.path]=c;});
+    var proposed={};
+    (changeSet.changes||[]).forEach(function(ch){
+      proposed[ch.path]=true;
+      var observed=byPath[ch.path];
+      if(!observed){errors.push('verify: no observed change at '+ch.path);return;}
+      if(observed.changeType!==ch.type)errors.push('verify: '+ch.path+' expected '+ch.type+' observed '+observed.changeType);
+      if(StoryStore.hash(observed.after)!==StoryStore.hash(ch.after))errors.push('verify: '+ch.path+' after value mismatch');
+    });
+    diff.changes.forEach(function(c){if(!proposed[c.path])warnings.push('verify: unproposed change at '+c.path);});
+    return{valid:errors.length===0,errors:errors,warnings:warnings,checkedAt:nowOf(options),changes:diff.changes};
+  }
+
+  function apply(changeSet,options){
+    var at=nowOf(options);
+    if(!isPlainObject(changeSet))return{ok:false,status:null,errors:['changeSet: expected object']};
+    // gate 1: contract validity
+    var validation=StoryContract.validateChangeSet(changeSet,at);
+    if(!validation.valid){
+      changeSet.status=S.REJECTED;changeSet.errors=validation.errors;
+      return{ok:false,status:S.REJECTED,errors:validation.errors};
+    }
+    // gate 2: duplicate (never apply the same ChangeSet twice)
+    if(isAlreadyApplied(changeSet.changeSetId))return{ok:false,status:changeSet.status,errors:['duplicate_changeset']};
+    // gate 3: stale base state (must not overwrite newer state)
+    if(changeSet.baseStateHash&&changeSet.baseStateHash!==currentStateHash()){
+      return{ok:false,status:changeSet.status,errors:['stale_changeset']};
+    }
+    // gate 4: preconditions (before must match current state)
+    var failed=checkPreconditions(changeSet);
+    if(failed.length)return{ok:false,status:changeSet.status,errors:['precondition_failed: '+failed.join(', ')],paths:failed};
+    // gate 5: approval
+    if(changeSet.status!==S.APPROVED)return{ok:false,status:changeSet.status,errors:['changeset_not_approved']};
+
+    var before=StoryStore.snapshot();
+    changeSet.status=S.APPLIED;
+    var results=[];
+    try{
+      results=AIExecutionLayerBridge.applyChangeSet(changeSet);
+    }catch(e){
+      StoryStore.rollback(before);
+      changeSet.status=S.FAILED;changeSet.errors=[String((e&&e.message)||e)];
+      return{ok:false,status:S.FAILED,errors:changeSet.errors};
+    }
+    var failedWrites=results.filter(function(r){return !r.ok;});
+    if(failedWrites.length){
+      StoryStore.rollback(before);
+      changeSet.status=S.FAILED;
+      changeSet.errors=failedWrites.map(function(r){return r.path+': '+(r.errors||[]).join('; ');});
+      return{ok:false,status:S.FAILED,errors:changeSet.errors,results:results};
+    }
+    var after=StoryStore.snapshot();
+    var verification=verify(changeSet,before,after,options);
+    if(!verification.valid){
+      StoryStore.rollback(before);
+      changeSet.status=S.FAILED;changeSet.errors=verification.errors;
+      return{ok:false,status:S.FAILED,errors:verification.errors,verification:verification};
+    }
+    changeSet.status=S.VERIFIED;
+    StoryStore.appendChangeLedger({
+      changeSetId:changeSet.changeSetId,source:changeSet.source,operation:changeSet.operation,
+      status:S.VERIFIED,appliedAt:at,appliedCount:results.length,
+      stateHashBefore:StoryStore.hash(before),stateHashAfter:StoryStore.hash(after)
+    });
+    return{ok:true,status:S.VERIFIED,results:results,verification:verification,changes:verification.changes};
+  }
+
+  function getLedger(){return ledger().slice();}
+  function resetLedger(){StoryStore.clearChangeLedger();}
+
+  return{
+    STATUS:S,propose:propose,validate:validate,approve:approve,reject:reject,apply:apply,verify:verify,
+    getLedger:getLedger,resetLedger:resetLedger,checkPreconditions:checkPreconditions
+  };
+})();
+
+// Bridge: ChangeSetRuntime -> ExecutionLayer -> StoryStore
+var AIExecutionLayerBridge={applyChangeSet:function(changeSet){return AIRuntime.ExecutionLayer.applyChangeSet(changeSet);}};
+AIRuntime.ChangeSetRuntime=ChangeSetRuntime;
+AIRuntime.StoryContract=StoryContract;
 
 // ===== UI Layer =====
 var curPage='dashboard';var curChId=null;var curView='list';
@@ -864,7 +1957,7 @@ function closeModal(){document.getElementById('modalContainer').innerHTML='';}
 function toast(msg,type){var c=document.getElementById('toastContainer');var t=document.createElement('div');t.className='toast toast-'+(type||'info');t.textContent=msg;c.appendChild(t);setTimeout(function(){t.remove();},3000);}
 
 function exportData(){var data=StoryStore.exportJSON();var blob=new Blob([data],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='novel-data.json';a.click();toast('已导出','success');}
-function importData(input){var file=input.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(e){try{StoryStore.importJSON(e.target.result);navigate(curPage);toast('已导入','success');}catch(err){toast('导入失败','error');}};reader.readAsText(file);}
+function importData(input){var file=input.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(e){var res;try{res=StoryStore.importJSON(e.target.result);}catch(err){res={ok:false,errors:[String((err&&err.message)||err)]};}if(res&&res.ok){navigate(curPage);toast('已导入','success');}else{toast('导入失败：'+((res&&res.errors&&res.errors[0])||'数据不合法'),'error');}};reader.readAsText(file);}
 function resetData(){if(!confirm('确认重置所有数据？'))return;StoryStore.reset();navigate('dashboard');toast('已重置','success');}
 
 // Command palette
