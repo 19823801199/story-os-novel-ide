@@ -156,6 +156,7 @@ other:{name:'其他',worldFields:[{key:'custom',label:'自定义',required:true}
 // ===== StoryStore: Unified Data Access Layer =====
 var StoryStore=(function(){
   var STORAGE_KEY='novelcraft_unified_v1';
+var _storeRevision=0;
   var OLD_NC_KEY='novelcraft_pro_v1';
   var OLD_WENSI_KEY='wensi_books_v9';
 
@@ -168,7 +169,7 @@ var StoryStore=(function(){
       meta:{title:'未命名小说',genre:'fantasy',dailyGoal:4000,createdAt:0,theme:'dark',fontSize:15,autoSave:true},
       chapters:[],characters:[],relationships:[],world:{setting:{},locations:[],factions:[],rules:[]},
       timeline:[],foreshadowing:[],conflicts:[],
-      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[],actionDecisions:[]},
+      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[],actionDecisions:[],chapterSummaries:{},volumeSummaries:{}},
       _lastParseResult:null
     };
   }
@@ -355,7 +356,9 @@ var StoryStore=(function(){
       activeConflicts:asArray(ns.activeConflicts),pendingForeshadows:asArray(ns.pendingForeshadows),
       characterPresence:asObject(ns.characterPresence),lastAnalysis:asNumber(ns.lastAnalysis,0),
       aiSuggestions:asObject(ns.aiSuggestions),issues:asArray(ns.issues),changeLedger:asArray(ns.changeLedger),
-      actionDecisions:asArray(ns.actionDecisions)
+      actionDecisions:asArray(ns.actionDecisions),
+      chapterSummaries:asObject(ns.chapterSummaries),
+      volumeSummaries:asObject(ns.volumeSummaries)
     };
 
     // contracts must be pure data: strip executable values
@@ -532,6 +535,23 @@ var StoryStore=(function(){
       _state.narrative_state[single.field]=deepClone(change.after);
       return{ok:true,changeType:'update',path:path};
     }
+    // Phase 6: nested narrative_state map path (narrative_state.<map>.<id>)
+    var nested=/^narrative_state.([A-Za-z_]+).([A-Za-z0-9_\-]+)$/.exec(path);
+    if(nested){
+      if(!isPlainObject(_state.narrative_state))_state.narrative_state={};
+      var mapKey=nested[1],entryKey=nested[2];
+      if(!isPlainObject(_state.narrative_state[mapKey]))_state.narrative_state[mapKey]={};
+      var container=_state.narrative_state[mapKey];
+      if(changeType==='remove'){
+        if(!container[entryKey])return{ok:false,errors:['remove: not found '+path]};
+        delete container[entryKey];
+        return{ok:true,changeType:'remove',path:path};
+      }
+      if(changeType==='add'&&container[entryKey])return{ok:false,errors:['add: entry exists '+path]};
+      if(changeType==='update'&&!container[entryKey])return{ok:false,errors:['update: entry not found '+path]};
+      container[entryKey]=deepClone(change.after);
+      return{ok:true,changeType:changeType,path:path};
+    }
     var col=collectionOfPath(path);
     if(!col)return{ok:false,errors:['path: unsupported '+path]};
     var list=listOfCollection(col.key);
@@ -643,6 +663,7 @@ var StoryStore=(function(){
 
   var _saveTimer=null;
   function persist(){
+    _storeRevision++;
     try{localStorage.setItem(STORAGE_KEY,JSON.stringify(_state));}catch(e){console.error('[StoryStore] persist error:',e);}
   }
 
@@ -724,6 +745,8 @@ var StoryStore=(function(){
     getChangeLedger:function(){return _state.narrative_state.changeLedger||[];},
     appendChangeLedger:function(entry){if(!_state.narrative_state.changeLedger)_state.narrative_state.changeLedger=[];_state.narrative_state.changeLedger.push(deepClone(entry));persist();return entry;},
     clearChangeLedger:function(){_state.narrative_state.changeLedger=[];persist();},
+    getRevision:function(){return _storeRevision;},
+    touch:function(){persist();return _storeRevision;},
     // Phase 5.3: 审批/拒绝审计（记录在唯一事实来源内部）
     getActionDecisions:function(){return (_state.narrative_state.actionDecisions||[]).slice();},
     appendActionDecision:function(entry){if(!_state.narrative_state.actionDecisions)_state.narrative_state.actionDecisions=[];_state.narrative_state.actionDecisions.push(deepClone(entry));persist();return entry;},
@@ -1992,6 +2015,117 @@ var AIRuntime=(function(){
         sceneB:{pass:b.analysis.decisions.length>0,issues:b.analysis.issues.length,decisions:b.analysis.decisions.length,result:b},
         sceneC:{pass:c.analysis.decisions.length>0,issues:c.analysis.issues.length,decisions:c.analysis.decisions.length,result:c}
       };
+    },
+    // ===== Phase 6: 真异步回归套件（Promise / 定时器 / 取消 / 退避）=====
+    runAsyncRegressionTests:function(){
+      var results=[];
+      function t(id,name,pass){results.push({id:id,name:name,pass:!!pass});}
+      var fixture={meta:{title:'P6A',genre:'fantasy'},
+        chapters:[{id:'chapter_001',title:'第一章',content:'林默走进客栈。',wordCount:8,status:'已完成',order:0,
+          aiAnalysis:{characters:['林默'],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}}],
+        characters:[{id:'char_001',name:'林默',charType:'protagonist',tags:[],aliases:[],fields:{},relations:[],
+          presence:{firstAppear:0,lastAppear:0,chapterIds:[0],appearCount:1},
+          aiProfile:{arcStage:'',consistencyScore:100,importance:10}}],
+        world:{setting:{},locations:[],factions:[],rules:[]},timeline:[],foreshadowing:[],conflicts:[],
+        narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],
+          characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[],actionDecisions:[],
+          chapterSummaries:{},volumeSummaries:{}}};
+      var envelope={choices:[{message:{content:JSON.stringify({characters:[{name:'林默',evidence:[{sourceId:'chapter_001',start:0,end:2}]}],
+        locations:[],events:[],relationships:[],foreshadowing:[],timeline:[],emotions:[]})}}],
+        usage:{prompt_tokens:1,completion_tokens:2,total_tokens:3}};
+      function cfg(){var c=ProviderSettings.defaults();c.enabled=true;c.provider='mock';c.model='async-model';return c;}
+      function injected(fn){
+        var orig=injectTestState(fixture);
+        var out=fn();
+        function cleanup(v){restoreState(orig);return v;}
+        if(out&&typeof out.then==='function')return out.then(cleanup,function(e){cleanup();throw e;});
+        return Promise.resolve(cleanup(out));
+      }
+      var chain=Promise.resolve();
+      function step(fn){chain=chain.then(fn);return chain;}
+
+      step(function(){
+        var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',
+          transport:function(){return new Promise(function(){});}});
+        return p.complete({input:'林默'},{timeoutMs:15}).then(function(r){
+          t('A1','async timeout → TIMEOUT（真实定时器）',r.success===false&&r.error.code==='TIMEOUT'&&r.error.retryable===true);
+        });
+      });
+      step(function(){
+        var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:function(){
+          return new Promise(function(resolve,reject){
+            setTimeout(function(){var e=new Error('the operation was aborted');e.name='AbortError';reject(e);},5);
+          });
+        }});
+        return p.complete({input:'林默'},{maxRetries:0}).then(function(r){
+          t('A2','async abort → CANCELLED（不可重试）',r.success===false&&r.error.code==='CANCELLED'&&r.error.retryable===false);
+        });
+      });
+      step(function(){
+        var started=Date.now(),calls=0;
+        var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',maxRetries:2,transport:function(){
+          calls++;
+          return new Promise(function(resolve){
+            setTimeout(function(){
+              resolve(calls<3?{ok:false,status:503,text:''}:{ok:true,status:200,text:JSON.stringify(envelope)});
+            },1);
+          });
+        }});
+        return p.complete({input:'林默'},{maxRetries:2,retryDelayMs:5}).then(function(r){
+          var waited=Date.now()-started;
+          t('A3','async 重试 + 指数退避真实等待',r.success===true&&r.attempts===3&&calls===3&&
+            r.retryDelays.length===2&&r.retryDelays[0]===5&&r.retryDelays[1]===10&&waited>=14);
+        });
+      });
+      step(function(){
+        return injected(function(){
+          var h=StoryStore.hash(StoryStore.snapshot());
+          LLMChapterAnalysis.initiative=null;
+          var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:function(){
+            return new Promise(function(resolve){setTimeout(function(){resolve({ok:false,status:401,text:'{"error":"unauthorized"}'});},5);});
+          }});
+          return LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:p,config:cfg()}).then(function(r){
+            t('A4','async Provider 失败 → 降级且状态不变',
+              r.source==='deterministic'&&r.errors[0].code==='AUTH_ERROR'&&r.fallback===true&&
+              StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0);
+          });
+        });
+      });
+      step(function(){
+        return injected(function(){
+          var h=StoryStore.hash(StoryStore.snapshot());
+          var chunks=0;
+          var p={provider:'async-stream',model:'am',complete:function(){return Promise.resolve(makeProviderResult({success:false,error:makeProviderError('UNKNOWN_ERROR','n/a')}));},
+            stream:function(request,onChunk){
+              return new Promise(function(resolve){
+                setTimeout(function(){
+                  if(typeof onChunk==='function'){onChunk({delta:'{"characters"',index:0});chunks++;onChunk({delta:':[]}',index:1});chunks++;}
+                  resolve(makeProviderResult({provider:'async-stream',model:'am',requestId:'req-async-stream',success:true,
+                    output:'{"characters":[]}',structured:{characters:[],locations:[],events:[],relationships:[],foreshadowing:[],timeline:[],emotions:[]},
+                    usage:{inputTokens:1,outputTokens:2,totalTokens:3},latencyMs:3,error:null,rawResponse:'{}'}));
+                },5);
+              });
+            }};
+          return LLMChapterAnalysis.runStream('chapter_001',{provider:p,config:cfg()}).then(function(r){
+            t('A5','async streaming → 缓冲组装 + 不写状态',
+              r.streamed===true&&r.streamState.chunks===chunks&&r.streamState.bufferLength>0&&
+              StoryStore.hash(StoryStore.snapshot())===h);
+          });
+        });
+      });
+      step(function(){
+        return injected(function(){
+          var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:function(){
+            return Promise.resolve({ok:true,status:200,text:JSON.stringify(envelope)});
+          }});
+          return LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:p,config:cfg()}).then(function(r){
+            t('A6','async 成功链路 → 结构化 + 人工审批提案',
+              r.source==='llm'&&!!r.changeSet&&r.changeSet.requiresHumanApproval===true&&
+              !!r.auditId&&AIAuditStore.list({}).length>=1);
+          });
+        });
+      });
+      return chain.then(function(){return{results:results,allPass:results.every(function(r){return r.pass;})};});
     },
     runRegressionTests:function(){
       var results=[];
@@ -3477,7 +3611,495 @@ var AIRuntime=(function(){
       });
       t(147,'同一章节的 LLM 提案幂等（changeSetId 稳定）',changeSetSameSafety);
 
+      // ===== Phase 6 tests (148-192): Context, Memory & Long-Context Runtime =====
+      function p6Chapters(n,text){
+        var out=[];
+        for(var i=0;i<n;i++){
+          out.push({id:'chapter_00'+(i+1),title:'第'+(i+1)+'章',
+            content:(text||'林默走进客栈，看见苏晚正在抚琴。')+('（第'+(i+1)+'章）'),
+            wordCount:40,status:'已完成',order:i,
+            aiAnalysis:{characters:['林默'],locations:['客栈'],events:['进入客栈'],foreshadowHits:[],emotions:['平静'],timeHints:[],lastParsed:0}});
+        }
+        return out;
+      }
+      function p6Fixture(opts){
+        opts=opts||{};
+        return p53Fixture({
+          chapters:opts.chapters||p6Chapters(opts.nChapters||3),
+          characters:opts.characters||[
+            mkChar('char_001','林默','protagonist',{aliases:['林师兄'],fields:{ability:'炼气',personality:'谨慎',goal:''},presence:{firstAppear:0,lastAppear:2,chapterIds:[0,1,2],appearCount:3}}),
+            mkChar('char_002','苏晚','supporting',{presence:{firstAppear:0,lastAppear:1,chapterIds:[0],appearCount:1}})
+          ],
+          foreshadowing:opts.foreshadowing||[{id:'fs_001',content:'玉佩的秘密',chapterPlaced:0,chapterExpected:9,status:'pending',note:'',linkedChapterId:null}],
+          timeline:opts.timeline||[{id:'tl_001',time:'第一天',event:'抵达客栈'}]
+        });
+      }
+      function p6Summaries(){
+        var n=StoryStore.getNarrativeState();
+        return n.chapterSummaries||{};
+      }
+
+      // --- Context 148-155 ---
+      var ctxExtraction=(function(){
+        var built=StoryContextBuilder.buildExtractionContext('chapter_001',{maxInputTokens:2000});
+        var names=built.sections.map(function(s){return s.name;});
+        return built.task==='chapter_extraction'&&built.chapterId==='chapter_001'&&
+          names[0]==='chapter'&&names.indexOf('characters')>0&&names.indexOf('foreshadowing')>0&&
+          built.sections[0].priority===0&&built.report.sections.length===built.sections.length;
+      });
+      t(148,'Extraction Context（当前章节 + 角色索引 + 世界设定 + 伏笔）',withState(p6Fixture(),function(){return ctxExtraction;}));
+
+      var ctxConsistency=withState(p6Fixture(),function(){
+        var built=StoryContextBuilder.buildConsistencyContext('chapter_001',{rules:['power_level_conflict','arc_stagnation']});
+        var ruleSection=built.sections.filter(function(s){return s.name==='ruleFacts';})[0];
+        return built.task==='consistency_check'&&!!ruleSection&&ruleSection.text.indexOf('power_level_conflict')>=0&&
+          ruleSection.text.indexOf('arc_stagnation')>=0&&ruleSection.text.indexOf('章节数=')>=0;
+      });
+      t(149,'Consistency Context（规则所需事实驱动）',ctxConsistency);
+
+      var ctxWriting=withState(p6Fixture(),function(){
+        var built=StoryContextBuilder.buildWritingContext('chapter_002',{maxInputTokens:4000});
+        var p={};
+        built.sections.forEach(function(s){p[s.name]=s.priority;});
+        return built.task==='writing_assist'&&p.hardFacts===0&&p.characters===1&&p.foreshadowing===2&&
+          p.currentArc===3&&p.recentChapters===4&&p.summaries===5;
+      });
+      t(150,'Writing Context 优先级阶梯（P0→P5）',ctxWriting);
+
+      var ctxPriorityDiffers=withState(p6Fixture(),function(){
+        var w=StoryContextBuilder.buildWritingContext('chapter_002',{});
+        var c=StoryContextBuilder.buildCopilotContext('chapter_002',{});
+        var e=StoryContextBuilder.buildExtractionContext('chapter_002',{});
+        return w.task!==c.task&&c.task!==e.task&&
+          w.sections[0].name==='hardFacts'&&c.sections[0].name==='chapter'&&e.sections[0].name==='chapter'&&
+          c.sections.map(function(s){return s.name;}).indexOf('diagnosis')>0;
+      });
+      t(151,'不同任务 → 不同 Context',ctxPriorityDiffers);
+
+      var ctxEstimate=(function(){
+        var text='林默走进客栈。';
+        return ContextBudgeter.estimate(text)===estimateTokens(text)&&
+          ContextBudgeter.estimate('')===0&&ContextBudgeter.estimate({a:1})===estimateTokens('{"a":1}');
+      })();
+      t(152,'token 估算（ContextBudgeter.estimate）',ctxEstimate);
+
+      var ctxTrim=withState(p6Fixture(),function(){
+        var sections=[
+          ContextBudgeter.makeSection('big',5,new Array(400).join('测'),{}),
+          ContextBudgeter.makeSection('small',0,'短内容',{})
+        ];
+        var alloc=ContextBudgeter.allocate(sections,{maxInputTokens:80});
+        var big=alloc.sections.filter(function(s){return s.name==='big';})[0];
+        var small=alloc.sections.filter(function(s){return s.name==='small';})[0];
+        return small.included&&!small.truncated&&
+          (big.included===false||big.truncated===true)&&
+          alloc.usedTokens<=alloc.effectiveBudget&&alloc.truncated===true;
+      });
+      t(153,'token budget 裁剪（超预算 → 低优先级先被裁剪）',ctxTrim);
+
+      var ctxDeterministic=withState(p6Fixture(),function(){
+        var a=StoryContextBuilder.buildWritingContext('chapter_002',{maxInputTokens:200});
+        var b=StoryContextBuilder.buildWritingContext('chapter_002',{maxInputTokens:200});
+        return StoryStore.hash(a.report)===StoryStore.hash(b.report)&&a.promptHash===b.promptHash&&
+          StoryStore.hash(a.allocation.sections)===StoryStore.hash(b.allocation.sections);
+      });
+      t(154,'确定性裁剪（同输入同结果）',ctxDeterministic);
+
+      var ctxReport=withState(p6Fixture(),function(){
+        var built=StoryContextBuilder.buildCopilotContext('chapter_001',{maxInputTokens:24});
+        var r=built.report;
+        var keys=['totalEstimatedTokens','budget','usedTokens','truncated','sections'];
+        var sectionOk=r.sections.every(function(s){return ('name' in s)&&('priority' in s)&&('estimatedTokens' in s)&&('included' in s);});
+        return keys.every(function(k){return k in r;})&&sectionOk&&r.truncated===true&&r.budget===24&&
+          r.usedTokens<=r.effectiveBudget&&(r.removed.length>0||r.sections.some(function(s){return s.truncated;}))&&
+          typeof built.promptHash==='string'&&built.promptHash.length>0;
+      });
+      t(155,'Context Report（可解释：预算/已用/裁剪/分段）',ctxReport);
+
+      // --- Summary 156-161 ---
+      var sumContract=withState(p6Fixture(),function(){
+        var s=ChapterSummary.deterministic('chapter_001',{now:1000});
+        var all=ChapterSummary.CONTRACT_FIELDS.every(function(k){return k in s;});
+        return all&&s.chapterId==='chapter_001'&&s.generatedBy==='deterministic'&&s.generatedAt===1000&&
+          s.sourceHash===ChapterSummary.hashOf(StoryStore.getChapter('chapter_001').content)&&
+          s.summary.indexOf('开头')>=0&&s.summary.indexOf('结尾')>=0&&Array.isArray(s.unresolved);
+      });
+      t(156,'ChapterSummary contract（9 字段）',sumContract);
+
+      var sumSourceHash=withState(p6Fixture(),function(){
+        var s=ChapterSummary.deterministic('chapter_001',{});
+        return s.sourceHash===StoryStore.hash(StoryStore.getChapter('chapter_001').content)&&ChapterSummary.isValid(s);
+      });
+      t(157,'summary 绑定 sourceHash',sumSourceHash);
+
+      var sumInvalidated=withState(p6Fixture(),function(){
+        var s=ChapterSummary.deterministic('chapter_001',{});
+        var st=ChapterSummary.store(s,{});
+        var beforeValid=ChapterSummary.isValid(ChapterSummary.get('chapter_001'));
+        StoryStore.updateChapter('chapter_001',{content:'完全不同的正文内容，长度也不同。'});
+        var afterValid=ChapterSummary.isValid(ChapterSummary.get('chapter_001'));
+        return st.ok&&beforeValid===true&&afterValid===false;
+      });
+      t(158,'正文修改 → 旧摘要失效',sumInvalidated);
+
+      var sumFallback=withState(p6Fixture(),function(){
+        var saved=ProviderSettings.load();
+        ProviderSettings.save({enabled:false,provider:'mock'});
+        var r=ChapterSummary.generate('chapter_001',{now:1000});
+        ProviderSettings.save(saved);
+        return r.source==='deterministic'&&r.providerResult===null&&r.summary.generatedBy==='deterministic'&&
+          r.summary.summary.indexOf('『')>=0;
+      });
+      t(159,'确定性 fallback 摘要（不虚构文学总结）',sumFallback);
+
+      var sumLlm=withState(p6Fixture(),function(){
+        var provider=MockAIProvider({output:{summary:'林默在客栈遇见苏晚。',keyFacts:['相遇'],characters:['林默','苏晚'],events:['相遇'],unresolved:[]}});
+        var r=ChapterSummary.generate('chapter_001',{provider:provider,config:p54Cfg(),store:true,now:2000});
+        var stored=ChapterSummary.get('chapter_001');
+        return r.source==='llm'&&ChapterSummarySchema.validate(r.summary).valid&&r.store&&r.store.ok&&
+          !!stored&&stored.generatedBy==='llm'&&stored.summary==='林默在客栈遇见苏晚。'&&
+          r.summary.sourceHash===ChapterSummary.hashOf(StoryStore.getChapter('chapter_001').content);
+      });
+      t(160,'LLM 摘要（schema 校验通过后存储）',sumLlm);
+
+      var sumInvalid=withState(p6Fixture(),function(){
+        var provider=MockAIProvider({output:{summary:12345}});
+        var r=ChapterSummary.generate('chapter_001',{provider:provider,config:p54Cfg()});
+        var bad=ChapterSummarySchema.validate({summary:123});
+        var tooLong=ChapterSummarySchema.validate({summary:new Array(700).join('字')});
+        return r.source==='deterministic'&&!bad.valid&&!tooLong.valid&&
+          bad.errors.join(',').indexOf('summary')>=0;
+      });
+      t(161,'非法摘要被拒绝（回落确定性）',sumInvalid);
+
+      // --- Memory 162-169 ---
+      var memL0=withState(p6Fixture(),function(){
+        var lv=MemoryIndex.levels(1,{});
+        return lv.L0.length===1&&lv.L0[0].id==='chapter_002'&&lv.L0[0].type==='chapter'&&
+          lv.stats.L0.items===1;
+      });
+      t(162,'L0 当前章节记忆',memL0);
+
+      var memL1=withState(p6Fixture(),function(){
+        var lv=MemoryIndex.levels(2,{recent:3});
+        return lv.L1.length===2&&lv.L1[0].id==='chapter_001'&&lv.L1[1].id==='chapter_002'&&
+          lv.stats.L1.items===2;
+      });
+      t(163,'L1 最近章节记忆',memL1);
+
+      var memL2=withState(p6Fixture(),function(){
+        var lv=MemoryIndex.levels(1,{});
+        var types=lv.L2.map(function(x){return x.type;});
+        return types.indexOf('character')>=0&&types.indexOf('foreshadow')>=0&&types.indexOf('timeline')>=0&&
+          lv.L2.length>=2;
+      });
+      t(164,'L2 长期事实记忆（角色/伏笔/时间线）',memL2);
+
+      var memL3=withState(p6Fixture(),function(){
+        ChapterSummary.store(ChapterSummary.deterministic('chapter_001',{}),{});
+        VolumeSummary.build(0,{store:true});
+        MemoryIndex.rebuild();
+        var lv=MemoryIndex.levels(1,{});
+        var types=lv.L3.map(function(x){return x.type;});
+        return types.indexOf('summary')>=0&&types.indexOf('volume')>=0&&lv.stats.L3.items>=2;
+      });
+      t(165,'L3 历史摘要记忆（章节 + 卷）',memL3);
+
+      var memRebuild=withState(p6Fixture(),function(){
+        var a=MemoryIndex.stats();
+        var rev0=StoryStore.getRevision();
+        StoryStore.addConflict({description:'测试冲突'});
+        var rev1=StoryStore.getRevision();
+        MemoryIndex.invalidate();
+        var b=MemoryIndex.rebuild();
+        var c=MemoryIndex.ensure();
+        return rev1>rev0&&a.counts.chapters===3&&b.counts.chapters===3&&c.counts.characters===2&&
+          a.revision>=0;
+      });
+      t(166,'MemoryIndex 可重建 + 缓存失效（revision）',memRebuild);
+
+      var memSearchDeterministic=withState(p6Fixture(),function(){
+        var a=MemoryIndex.search('林默');
+        var b=MemoryIndex.search('林默');
+        return StoryStore.hash(a)===StoryStore.hash(b)&&a.items.length>0&&
+          a.items[0].score>=a.items[a.items.length-1].score;
+      });
+      t(167,'MemoryIndex 检索确定性（同 query 同顺序）',memSearchDeterministic);
+
+      var memRanking=withState(p6Fixture(),function(){
+        var byEntity=MemoryIndex.search('林默');
+        var byBigram=MemoryIndex.search('客栈');
+        var entityTop=byEntity.items[0];
+        return entityTop.type==='character'&&entityTop.id==='char_001'&&entityTop.score>=10&&
+          byBigram.items.length>0&&byBigram.items[0].score<entityTop.score;
+      });
+      t(168,'检索排序（实体引用 > 关键词/bigram）',memRanking);
+
+      var memEntity=withState(p6Fixture(),function(){
+        var alias=MemoryIndex.search('林师兄');
+        var cand=MemoryIndex.search('林');
+        var r=StoryEngine.resolveEntity('林师兄');
+        return r.status==='resolved'&&r.entityRef.entityId==='char_001'&&
+          alias.items[0].type==='character'&&alias.items[0].id==='char_001'&&
+          cand.items.every(function(x){return x.type!=='character'||x.id!=='char_001'||x.score>0;});
+      });
+      t(169,'Entity Memory（别名/归一化 → character:char_001）',memEntity);
+
+      // --- Entity Updates 170-174 ---
+      var entUpdate=withState(p6Fixture(),function(){
+        var text='林默走进客栈。';
+        var provider=MockAIProvider({output:{characters:[{name:'林默',fields:{personality:'沉稳'},evidence:[{sourceId:'chapter_001',start:0,end:2}]}],
+          locations:[],events:[],relationships:[],foreshadowing:[],timeline:[],emotions:[]}});
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:provider,config:p54Cfg()});
+        var draft=(r.changeSet?r.changeSet.changes:[]).filter(function(c){return c.path.indexOf('.fields.personality')>=0;})[0];
+        return r.source==='llm'&&!!draft&&draft.type==='update'&&draft.before==='谨慎'&&draft.after==='沉稳'&&
+          draft.path==='characters.char_001.fields.personality'&&draft.evidence.length>0;
+      });
+      t(170,'既有角色最小更新（before 来自系统状态）',entUpdate);
+
+      var entMinDiff=withState(p6Fixture(),function(){
+        var provider=MockAIProvider({output:{characters:[{name:'林默',fields:{personality:'谨慎',ability:''},evidence:[{sourceId:'chapter_001',start:0,end:2}]}],
+          locations:[],events:[],relationships:[],foreshadowing:[],timeline:[],emotions:[]}});
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:provider,config:p54Cfg()});
+        var fieldChanges=(r.changeSet?r.changeSet.changes:[]).filter(function(c){return c.path.indexOf('.fields.')>=0;});
+        return r.source==='llm'&&fieldChanges.length===0;
+      });
+      t(171,'最小变更原则（值相同 → 不产生变更）',entMinDiff);
+
+      var entInvalidBefore=withState(p6Fixture(),function(){
+        var ctx={chapterId:'chapter_001'};
+        var built=LLMProposalBridge.toEntityUpdates({chapterId:'chapter_001',
+          extraction:normalizeChapterExtraction({characters:[{name:'林默',fields:{ability:'金丹'},evidence:[{start:0,end:2}]}]}),
+          verified:{'林默':[StoryContract.makeEvidence('chapter','chapter_001',0,2,'林默')]}});
+        var u=built.updates[0];
+        u.before='被篡改的旧值';
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'tamper',changes:[u],baseStateHash:StoryStore.hash(StoryStore.state)});
+        ChangeSetRuntime.validate(cs,{});
+        ChangeSetRuntime.approve(cs,'t',{});
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var res=ChangeSetRuntime.apply(cs,{});
+        return !!u&&!res.ok&&(res.errors.join(',').indexOf('precondition_failed')>=0)&&
+          StoryStore.hash(StoryStore.snapshot())===h&&
+          StoryStore.getCharacter('char_001').fields.ability==='炼气';
+      });
+      t(172,'before 不匹配 → 前置条件拒绝（状态不变）',entInvalidBefore);
+
+      var entEvidenceRequired=withState(p6Fixture(),function(){
+        var built=LLMProposalBridge.toEntityUpdates({chapterId:'chapter_001',
+          extraction:normalizeChapterExtraction({characters:[{name:'林默',fields:{ability:'元婴'},evidence:[]}]}),
+          verified:{}});
+        return built.updates.length===0&&built.rejected.length===1&&
+          built.rejected[0].kind==='character_field'&&built.rejected[0].field==='ability';
+      });
+      t(173,'既有实体更新必须有 evidence',entEvidenceRequired);
+
+      var entRollback=withState(p6Fixture(),function(){
+        var built=LLMProposalBridge.toEntityUpdates({chapterId:'chapter_001',
+          extraction:normalizeChapterExtraction({characters:[{name:'林默',fields:{ability:'金丹期'},evidence:[{start:0,end:2}]}]}),
+          verified:{'林默':[StoryContract.makeEvidence('chapter','chapter_001',0,2,'林默')]}});
+        var cs=ChangeSetRuntime.propose({source:'test',operation:'field_update',changes:built.updates,baseStateHash:StoryStore.hash(StoryStore.state)});
+        cs.changes.push(StoryContract.makeStateChange({changeId:StoryContract.makeChangeId(cs.changeSetId,'characters.char_001',99),
+          actionId:'forced',type:'add',target:StoryContract.makeEntityRef('character','char_001','林默'),
+          path:'characters.char_001',before:null,after:{id:'char_001'},reason:'forced',evidence:[],timestamp:1}));
+        ChangeSetRuntime.validate(cs,{});
+        ChangeSetRuntime.approve(cs,'t',{});
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var res=ChangeSetRuntime.apply(cs,{});
+        return !res.ok&&cs.status==='FAILED'&&StoryStore.hash(StoryStore.snapshot())===h&&
+          StoryStore.getCharacter('char_001').fields.ability==='炼气';
+      });
+      t(174,'既有实体更新失败 → 原子回滚',entRollback);
+
+      // --- Provider 175-180 ---
+      var provSignal=(function(){
+        var captured=null;
+        var t2=function(url,init){captured=init;return{ok:true,status:200,text:JSON.stringify(p54Envelope({characters:[]}))};};
+        var ctrl=createAbortController();
+        var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:t2});
+        var res=p.complete({input:'a'},{signal:ctrl?ctrl.signal:{aborted:false}});
+        return res.success===true&&!!captured&&!!captured.signal;
+      })();
+      t(175,'请求携带 AbortSignal（可取消）',provSignal);
+
+      var provAbort=(function(){
+        var ctrl=createAbortController();
+        var p=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:function(){return{ok:true,status:200,text:'{}'};}});
+        var aborted={aborted:true};
+        var res=p.complete({input:'a'},{signal:aborted});
+        var began=ProviderCancellation.begin({});
+        ProviderCancellation.abort('test');
+        var isAborted=ProviderCancellation.isAborted();
+        ProviderCancellation.end();
+        var mock=MockAIProvider().complete({input:'a'},{signal:{aborted:true}});
+        return res.success===false&&res.error.code==='CANCELLED'&&isAborted===true&&
+          typeof ProviderCancellation.begin==='function'&&
+          mock.success===false&&mock.error.code==='CANCELLED'&&began!==null;
+      })();
+      t(176,'AbortController 取消（Provider + Mock）',provAbort);
+
+      var provBackoff=(function(){
+        return retryDelayFor(0,{})===500&&retryDelayFor(1,{})===1000&&retryDelayFor(2,{})===2000&&
+          retryDelayFor(3,{})===4000&&retryDelayFor(10,{})===8000&&
+          retryDelayFor(0,{retryDelayMs:100,retryFactor:3})===100&&retryDelayFor(1,{retryDelayMs:100,retryFactor:3})===300;
+      })();
+      t(177,'指数退避延迟（500/1000/2000/4000，上限 8000）',provBackoff);
+
+      var provRetryLimit=(function(){
+        var calls=0;
+        var alwaysFail=function(){calls++;return{ok:false,status:503,text:''};};
+        var r=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:alwaysFail,maxRetries:2})
+          .complete({input:'a'},{maxRetries:2});
+        return r.success===false&&r.attempts===3&&calls===3&&r.retryDelays.length===2&&
+          r.retryDelays[0]===500&&r.retryDelays[1]===1000;
+      })();
+      t(178,'重试上限 + 退避序列记录',provRetryLimit);
+
+      var streamCancel=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var r=LLMChapterAnalysis.runStream('chapter_001',{provider:MockAIProvider(),config:p54Cfg(),signal:{aborted:true}});
+        return r.source==='deterministic'&&r.streamed===true&&r.streamState.aborted===true&&
+          StoryStore.hash(StoryStore.snapshot())===h;
+      });
+      t(179,'流式取消 → 不写状态并降级',streamCancel);
+
+      var streamSafety=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var chunks=[];
+        var r=LLMChapterAnalysis.runStream('chapter_001',{provider:MockAIProvider(),config:p54Cfg()},function(c){chunks.push(c);});
+        return r.source==='llm'&&r.streamed===true&&r.streamState.chunks>0&&chunks.length===r.streamState.chunks&&
+          StoryStore.hash(StoryStore.snapshot())===h&&!!r.changeSet&&r.changeSet.requiresHumanApproval===true;
+      });
+      t(180,'流式缓冲 → ProviderResult → 提案（不写状态）',streamSafety);
+
+      // --- Audit 181-185 ---
+      var promptHashFull=withState(p6Fixture(),function(){
+        var a=StoryContextBuilder.buildExtractionContext('chapter_001',{instructions:'A'});
+        var b=StoryContextBuilder.buildExtractionContext('chapter_001',{instructions:'B'});
+        var c=StoryContextBuilder.buildExtractionContext('chapter_001',{instructions:'A',maxInputTokens:30});
+        return a.promptHash!==b.promptHash&&a.promptHash!==c.promptHash&&a.promptHash.length>0&&
+          a.promptHash===StoryStore.hash({system:a.prompt.system,task:a.task,context:a.prompt.context,instructions:a.prompt.instructions});
+      });
+      t(181,'promptHash 覆盖 system+task+context+instructions',promptHashFull);
+
+      var auditRecord=withState(p6Fixture(),function(){
+        AIAuditStore.clear();
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var list=AIAuditStore.list({});
+        var e=list[0];
+        return list.length===1&&!!e&&e.provider==='mock'&&e.model==='mock-model-v1'&&!!e.requestId&&
+          !!e.promptHash&&!!e.usage&&typeof e.latencyMs==='number'&&e.task==='chapter_extraction'&&
+          e.chapterId==='chapter_001'&&e.auditId.indexOf('au_')===0&&r.auditId===e.auditId;
+      });
+      t(182,'AI 审计记录（provider/model/requestId/promptHash/usage/latency）',auditRecord);
+
+      var auditTrace=withState(p6Fixture(),function(){
+        AIAuditStore.clear();
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var linked=AIAuditStore.linkChangeSet(r.auditId,r.changeSet.changeSetId);
+        var reread=AIAuditStore.get(r.auditId);
+        return !!linked&&linked.changeSetId===r.changeSet.changeSetId&&
+          reread.changeSetId===r.changeSet.changeSetId&&r.changeSet.auditId===r.auditId;
+      });
+      t(183,'Audit → ChangeSet 可追溯（auditId 回链）',auditTrace);
+
+      var auditKeyExclusion=withState(p6Fixture(),function(){
+        AIAuditStore.clear();
+        var saved=ProviderSettings.load();
+        var secret='sk-audit-secret-abc123';
+        ProviderSettings.save({enabled:true,provider:'openai-compatible',baseURL:'https://api.example.com/v1',model:'m',apiKey:secret});
+        LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        ProviderSettings.save(saved);
+        var auditJson=JSON.stringify(AIAuditStore.list({}));
+        var sanitized=AIAuditStore.sanitize({apiKey:secret,Authorization:'Bearer '+secret,nested:{token:secret},ok:1});
+        return auditJson.indexOf(secret)<0&&!('apiKey' in sanitized)&&!('Authorization' in sanitized)&&
+          !('token' in sanitized.nested)&&sanitized.ok===1&&AIAuditStore.assertNoSecret(sanitized).clean===true;
+      });
+      t(184,'API Key 不进入审计（sanitize 剥离敏感字段）',auditKeyExclusion);
+
+      var auditRawIsolation=withState(p6Fixture(),function(){
+        AIAuditStore.clear();
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var e=AIAuditStore.last();
+        var exportJson=StoryStore.exportJSON();
+        var ledgerJson=JSON.stringify(StoryStore.getChangeLedger());
+        return e.rawResponse!==null&&!!e.structured&&
+          exportJson.indexOf(String(e.rawResponse).slice(0,20))<0&&
+          ledgerJson.indexOf(String(e.rawResponse).slice(0,20))<0&&
+          !('rawResponse' in (r.changeSet.llm||{}))&&!('structured' in (r.changeSet.llm||{}));
+      });
+      t(185,'原始响应只进审计存储（不入 StoryState/账本/ChangeSet）',auditRawIsolation);
+
+      // --- Safety 186-192 ---
+      var safeMemory=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        MemoryIndex.rebuild();
+        MemoryIndex.search('林默');
+        MemoryIndex.levels(1,{});
+        MemoryIndex.stats();
+        return StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(186,'MemoryIndex 不能修改 StoryState',safeMemory);
+
+      var safeContext=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        StoryContextBuilder.buildExtractionContext('chapter_001',{});
+        StoryContextBuilder.buildConsistencyContext('chapter_001',{rules:['world_rule_conflict']});
+        StoryContextBuilder.buildWritingContext('chapter_001',{maxInputTokens:50});
+        StoryContextBuilder.buildCopilotContext('chapter_001',{});
+        return StoryStore.hash(StoryStore.snapshot())===h;
+      });
+      t(187,'ContextBuilder 不能修改 StoryState',safeContext);
+
+      var safeAudit=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        AIAuditStore.record({provider:'mock',model:'m',requestId:'r',rawResponse:'x'});
+        AIAuditStore.list({});
+        AIAuditStore.clear();
+        return StoryStore.hash(StoryStore.snapshot())===h;
+      });
+      t(188,'AuditStore 不能修改 StoryState',safeAudit);
+
+      var safeProviderFail=withState(p6Fixture(),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options('network_error'));
+        ChapterSummary.generate('chapter_001',{provider:MockAIProvider({scenario:'timeout'}),config:p54Cfg()});
+        return StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(189,'Provider 失败不改变 StoryState',safeProviderFail);
+
+      var safeSummaryChangeSet=withState(p6Fixture(),function(){
+        var s=ChapterSummary.deterministic('chapter_001',{});
+        var res=ChapterSummary.store(s,{source:'test:summary'});
+        var e=StoryStore.getChangeLedger()[0];
+        return res.ok&&!!e&&e.origin==='derived'&&e.source==='test:summary'&&
+          e.changes.indexOf('narrative_state.chapterSummaries.chapter_001')>=0&&
+          !!p6Summaries()['chapter_001'];
+      });
+      t(190,'摘要经 ChangeSet 写入（origin=derived，账本可查）',safeSummaryChangeSet);
+
+      var volumeSummary=withState(p6Fixture({nChapters:7}),function(){
+        var v=VolumeSummary.build(0,{store:true});
+        var v2=VolumeSummary.build(1,{store:true});
+        return v.volumeId==='volume_1'&&v.chapterCount===5&&v.chapterIds.length===5&&
+          v2.volumeId==='volume_2'&&v2.chapterCount===2&&v._store&&v._store.ok&&
+          Object.keys(VolumeSummary.all()).length===2&&VolumeSummary.buildAll({}).length===2;
+      });
+      t(191,'VolumeSummary（5 章一组分组摘要）',volumeSummary);
+
+      var uiInspectors=withState(p6Fixture(),function(){
+        var c=contextInspectorHTML(1);
+        var m=memoryInspectorHTML(1);
+        var a=auditInspectorHTML();
+        AIAuditStore.record({provider:'mock',model:'m',requestId:'r1',promptHash:'p',latencyMs:5});
+        var a2=auditInspectorHTML();
+        return c.indexOf('Context Inspector')>=0&&c.indexOf('预算')>=0&&c.indexOf('被裁剪')>=0&&
+          m.indexOf('Memory Inspector')>=0&&m.indexOf('L0')>=0&&m.indexOf('L3')>=0&&
+          a.indexOf('AI Audit')>=0&&a2.indexOf('mock')>=0&&a2.indexOf('清除审计')>=0;
+      });
+      t(192,'检查器 UI（Context / Memory / AI Audit）',uiInspectors);
+
       return{results:results,allPass:results.every(function(r){return r.pass;})};
+
 
 
     }
@@ -4089,7 +4711,7 @@ var ProviderErrors={
   CONFIG_ERROR:'CONFIG_ERROR',AUTH_ERROR:'AUTH_ERROR',NETWORK_ERROR:'NETWORK_ERROR',
   TIMEOUT:'TIMEOUT',RATE_LIMIT:'RATE_LIMIT',INVALID_RESPONSE:'INVALID_RESPONSE',
   SCHEMA_ERROR:'SCHEMA_ERROR',PROVIDER_ERROR:'PROVIDER_ERROR',BUDGET_EXCEEDED:'BUDGET_EXCEEDED',
-  UNKNOWN_ERROR:'UNKNOWN_ERROR'
+  CANCELLED:'CANCELLED',UNKNOWN_ERROR:'UNKNOWN_ERROR'
 };
 function providerErrorCodes(){
   var out=[];Object.keys(ProviderErrors).forEach(function(k){out.push(ProviderErrors[k]);});return out;
@@ -4207,6 +4829,8 @@ function mockComplete(request,options,scenario,canned,providerOpts){
       usage:{inputTokens:inputTokens,outputTokens:0,totalTokens:null},latencyMs:0,
       error:makeProviderError(code,message),rawResponse:(raw===undefined?null:raw)});
   }
+  var sig=(options&&options.signal)||null;
+  if(sig&&sig.aborted)return fail(ProviderErrors.CANCELLED,'请求已取消（AbortController）');
   if(scenario==='timeout')return fail(ProviderErrors.TIMEOUT,'模拟超时');
   if(scenario==='network_error')return fail(ProviderErrors.NETWORK_ERROR,'模拟网络错误');
   if(scenario==='auth_error')return fail(ProviderErrors.AUTH_ERROR,'模拟鉴权失败');
@@ -4234,7 +4858,9 @@ function defaultProviderTransport(url,init){
 }
 function classifyTransportThrow(e){
   var msg=String((e&&e.message)||e||'');
-  if(/timeout|timed out|abort/i.test(msg))return makeProviderError(ProviderErrors.TIMEOUT,msg);
+  var name=String((e&&e.name)||'');
+  if(name==='AbortError'||/abort|cancel/i.test(msg))return abortProviderError();
+  if(/timeout|timed out/i.test(msg))return makeProviderError(ProviderErrors.TIMEOUT,msg);
   if(/fetch|network|enotfound|econn|dns|socket|unavailable/i.test(msg))return makeProviderError(ProviderErrors.NETWORK_ERROR,msg);
   return makeProviderError(ProviderErrors.UNKNOWN_ERROR,msg);
 }
@@ -4279,6 +4905,11 @@ function openAICompatibleComplete(request,options,deps){
   var model=String(cfg.model||'');
   var requestId=String(opts.requestId||providerRequestId(cfg,request));
   var attempts=0;
+  var asyncMode=false;
+  var retryDelays=[];
+  var signal=opts.signal||cfg.signal||null;
+  if(signal&&signal.aborted)return makeProviderResult({provider:String(cfg.provider||'openai-compatible'),model:model,
+    requestId:requestId,success:false,error:abortProviderError()});
   var started=(typeof opts.now==='number')?opts.now:Date.now();
   function elapsed(){return Math.max(0,((typeof opts.now==='number')?opts.now:Date.now())-started);}
   function result(fields){
@@ -4289,6 +4920,7 @@ function openAICompatibleComplete(request,options,deps){
       latencyMs:(typeof fields.latencyMs==='number')?fields.latencyMs:elapsed(),
       error:fields.error||null,rawResponse:(fields.rawResponse===undefined?null:fields.rawResponse)});
     r.attempts=attempts;
+    r.retryDelays=retryDelays.slice();
     return r;
   }
   var budget=checkTokenBudget(request,{budget:{maxInputTokens:cfg.maxInputTokens,maxOutputTokens:cfg.maxOutputTokens},maxTokens:opts.maxTokens});
@@ -4300,11 +4932,16 @@ function openAICompatibleComplete(request,options,deps){
   var headers={'Content-Type':'application/json'};
   if(apiKey)headers.Authorization='Bearer '+apiKey;
   var init={method:'POST',headers:headers,body:JSON.stringify(buildProviderBody(cfg,request,opts))};
+  if(signal)init.signal=signal;
   var maxAttempts=((typeof opts.maxRetries==='number')?opts.maxRetries:((typeof cfg.maxRetries==='number')?cfg.maxRetries:0))+1;
   function onValue(res){
     var err=classifyHttpResponse(res);
     if(err){
-      if(err.retryable&&attempts<maxAttempts)return attempt();
+      if(err.retryable&&attempts<maxAttempts){
+        var d1=retryDelayFor(attempts-1,opts);retryDelays.push(d1);
+        var w1=waitBeforeRetry(d1,opts,asyncMode);
+        return w1?w1.then(function(){return attempt();}):attempt();
+      }
       return result({success:false,error:err,rawResponse:(res&&res.text!==undefined)?String(res.text):null});
     }
     var raw=(res&&res.text!==undefined)?String(res.text):'';
@@ -4323,7 +4960,11 @@ function openAICompatibleComplete(request,options,deps){
   }
   function onThrow(e){
     var terr=classifyTransportThrow(e);
-    if(terr.retryable&&attempts<maxAttempts)return attempt();
+    if(terr.retryable&&attempts<maxAttempts){
+      var d2=retryDelayFor(attempts-1,opts);retryDelays.push(d2);
+      var w2=waitBeforeRetry(d2,opts,asyncMode);
+      return w2?w2.then(function(){return attempt();}):attempt();
+    }
     return result({success:false,error:terr});
   }
   function attempt(){
@@ -4331,6 +4972,7 @@ function openAICompatibleComplete(request,options,deps){
     var out;
     try{out=transport(url,init);}catch(e){return onThrow(e);}
     if(isThenable(out)){
+      asyncMode=true;
       var timeoutMs=(typeof opts.timeoutMs==='number')?opts.timeoutMs:cfg.timeoutMs;
       var chained=out.then(onValue,onThrow);
       if(typeof timeoutMs==='number'&&timeoutMs>0&&typeof setTimeout==='function'){
@@ -4479,6 +5121,7 @@ var ChapterExtractionSchema={
         if(typeof c.name!=='string'||!c.name.length)errors.push('characters['+i+'].name: required string');
         if(c.confidence!==undefined&&typeof c.confidence!=='number')errors.push('characters['+i+'].confidence: expected number');
         if(c.evidence!==undefined&&!Array.isArray(c.evidence))errors.push('characters['+i+'].evidence: expected array');
+        if(c.fields!==undefined&&(typeof c.fields!=='object'||Array.isArray(c.fields)))errors.push('characters['+i+'].fields: expected object');
       });
     }
     [['locations','name'],['events','event'],['foreshadowing','content'],['timeline','time'],['emotions','emotion']].forEach(function(pair){
@@ -4506,7 +5149,9 @@ function normalizeChapterExtraction(obj){
   ChapterExtractionSchema.ARRAY_FIELDS.forEach(function(k){out[k]=Array.isArray(obj&&obj[k])?obj[k].slice():[];});
   out.characters=out.characters.filter(function(c){return c&&typeof c==='object'&&typeof c.name==='string'&&c.name.length;})
     .map(function(c){return{name:String(c.name),confidence:(typeof c.confidence==='number')?c.confidence:null,
-      evidence:Array.isArray(c.evidence)?c.evidence.slice():[]};});
+      evidence:Array.isArray(c.evidence)?c.evidence.slice():[],
+      fields:(c.fields&&typeof c.fields==='object'&&!Array.isArray(c.fields))
+        ?{personality:String(c.fields.personality||''),ability:String(c.fields.ability||''),goal:String(c.fields.goal||'')}:null};});
   out.locations=out.locations.map(function(l){return (typeof l==='string')?{name:l}:{name:String((l&&(l.name||l.location))||'')};})
     .filter(function(l){return !!l.name;});
   out.events=out.events.map(function(e){return (typeof e==='string')?{event:e}:{event:String((e&&e.event)||''),evidence:Array.isArray(e&&e.evidence)?e.evidence.slice():[]};})
@@ -4590,6 +5235,9 @@ var LLMProposalBridge={
           aiProfile:{arcStage:'',consistencyScore:100,importance:5}},
         reason:'LLM 抽取到新角色「'+c.name+'」',evidence:ev,confidence:0.7});
     });
+    var entityUpdates=LLMProposalBridge.toEntityUpdates({chapterId:chapterId,extraction:extraction,verified:verified});
+    entityUpdates.updates.forEach(function(u){drafts.push(u);});
+    entityUpdates.rejected.forEach(function(x){rejected.push(x);});
     extraction.foreshadowing.forEach(function(f){
       var ev=(verified['fs:'+f.content]||[]);
       if(!ev.length){rejected.push({kind:'foreshadowing',content:f.content,reason:'伏笔变更必须携带可验证 evidence'});return;}
@@ -4606,6 +5254,11 @@ var LLMProposalBridge={
         rejected.push({kind:'relationship',from:rel.from,to:rel.to,reason:'实体未解析，无法建立关系'});
         return;
       }
+      var existingPair=(StoryStore.snapshot().relationships||[]).filter(function(x){
+        return (x.fromId===a.entityRef.entityId&&x.toId===b.entityRef.entityId)||
+               (x.fromId===b.entityRef.entityId&&x.toId===a.entityRef.entityId);
+      })[0];
+      if(existingPair)return;   // 已存在：改为最小差异更新（toEntityUpdates）
       var id=StoryStore.nextId('relationships');
       drafts.push({actionId:'llm:relationship:'+a.entityRef.entityId+'>'+b.entityRef.entityId,type:'add',
         target:{entityType:'relationship',entityId:id,displayName:rel.from+'->'+rel.to},
@@ -4632,7 +5285,7 @@ var LLMProposalBridge={
     cs.requiresHumanApproval=true;
     cs.chapterId=String(input.chapterId||'');
     cs.llm={provider:String(res?res.provider:''),model:String(res?res.model:''),requestId:String(res?res.requestId:''),
-      promptHash:StoryStore.hash({input:String((input.chapter&&input.chapter.content)||'').slice(0,500),task:'chapter_extraction'}),
+      promptHash:String(input.promptHash||StoryStore.hash({input:String((input.chapter&&input.chapter.content)||'').slice(0,500),task:'chapter_extraction'})),
       usage:res?res.usage:null,latencyMs:res?(res.latencyMs||0):0};
     cs.rejectedFacts=built.rejected;
     cs.policy=StoryPolicy.evaluateChangeSet(cs);
@@ -4659,24 +5312,51 @@ var LLMChapterAnalysis={
     var provider=ProviderRuntime.resolve(opts);
     if(!provider)return deterministic('LLM disabled：未配置或未启用 Provider',null,[]);
     var cfg=ProviderRuntime.config(opts);
-    var request={input:String(chapter.content||''),chapterId:String(chapterId),task:'chapter_extraction',
-      system:'你是小说结构化抽取器。只输出 JSON：{"characters":[{"name":"","evidence":[{"start":0,"end":2}]}],"locations":[],"events":[],"relationships":[],"foreshadowing":[],"timeline":[],"emotions":[]}'};
+    var built=StoryContextBuilder.buildExtractionContext(String(chapterId),
+      {maxInputTokens:cfg.maxInputTokens,reserveOutputTokens:cfg.maxOutputTokens,
+        instructions:'只输出 JSON：{"characters":[{"name":"","evidence":[{"start":0,"end":2}],"fields":{"personality":"","ability":"","goal":""}}],"locations":[],"events":[],"relationships":[],"foreshadowing":[],"timeline":[],"emotions":[]}'});
+    var request={input:String(chapter.content||''),context:built.prompt.context,chapterId:String(chapterId),
+      task:'chapter_extraction',system:built.prompt.system,promptHash:built.prompt.promptHash};
     var res=ProviderRuntime.complete(provider,request,{schema:ChapterExtractionSchema,
       timeoutMs:cfg.timeoutMs,maxRetries:cfg.maxRetries,maxTokens:cfg.maxTokens,temperature:cfg.temperature,
-      budget:{maxInputTokens:cfg.maxInputTokens,maxOutputTokens:cfg.maxOutputTokens},requestId:opts.requestId});
+      budget:{maxInputTokens:cfg.maxInputTokens,maxOutputTokens:cfg.maxOutputTokens},requestId:opts.requestId,
+      promptHash:built.prompt.promptHash,signal:opts.signal});
+    opts.promptHash=built.prompt.promptHash;
+    opts.contextReport=built.report;
     if(isThenable(res))return res.then(function(r){return LLMChapterAnalysis.finish(chapterId,chapter,chapterIndex,r,opts,deterministic);});
     return LLMChapterAnalysis.finish(chapterId,chapter,chapterIndex,res,opts,deterministic);
   },
   finish:function(chapterId,chapter,chapterIndex,res,opts,deterministic){
+    var promptHash=String(opts.promptHash||'');
+    function auditRecord(fields){
+      var rec=AIAuditStore.record({task:'chapter_extraction',chapterId:String(chapterId),promptHash:promptHash,
+        provider:fields.provider||'',model:fields.model||'',requestId:fields.requestId||'',
+        usage:fields.usage||null,latencyMs:(typeof fields.latencyMs==='number')?fields.latencyMs:0,
+        rawResponse:fields.rawResponse===undefined?null:fields.rawResponse,
+        structured:fields.structured===undefined?null:fields.structured,error:fields.error||null});
+      LLMChapterAnalysis.lastAuditId=rec.auditId;
+      return rec.auditId;
+    }
     if(!res||!res.success){
       LLMChapterAnalysis.lastError=res?res.error:makeProviderError(ProviderErrors.UNKNOWN_ERROR,'无 ProviderResult');
-      return deterministic('LLM failed -> deterministic fallback',res,[LLMChapterAnalysis.lastError].filter(Boolean));
+      auditRecord({provider:res?res.provider:'',model:res?res.model:'',requestId:res?res.requestId:'',
+        usage:res?res.usage:null,latencyMs:res?res.latencyMs:0,rawResponse:res?res.rawResponse:null,
+        structured:null,error:LLMChapterAnalysis.lastError});
+      var outFail=deterministic('LLM failed -> deterministic fallback',res,[LLMChapterAnalysis.lastError].filter(Boolean));
+      outFail.auditId=LLMChapterAnalysis.lastAuditId;
+      return outFail;
     }
     var v=ChapterExtractionSchema.validate(res.structured);
     if(!v.valid){
       LLMChapterAnalysis.lastError=makeProviderError(ProviderErrors.SCHEMA_ERROR,v.errors.join('; '));
-      return deterministic('schema failed -> reject -> deterministic fallback',res,[LLMChapterAnalysis.lastError]);
+      auditRecord({provider:res.provider,model:res.model,requestId:res.requestId,usage:res.usage,latencyMs:res.latencyMs,
+        rawResponse:res.rawResponse,structured:res.structured,error:LLMChapterAnalysis.lastError});
+      var outSchema=deterministic('schema failed -> reject -> deterministic fallback',res,[LLMChapterAnalysis.lastError]);
+      outSchema.auditId=LLMChapterAnalysis.lastAuditId;
+      return outSchema;
     }
+    var auditId=auditRecord({provider:res.provider,model:res.model,requestId:res.requestId,usage:res.usage,
+      latencyMs:res.latencyMs,rawResponse:res.rawResponse,structured:res.structured,error:null});
     var extraction=normalizeChapterExtraction(res.structured);
     var text=String(chapter.content||'');
     var verified={},evidenceRejected=[];
@@ -4695,8 +5375,12 @@ var LLMChapterAnalysis={
     var built=LLMProposalBridge.toStateChanges({chapterId:chapterId,chapter:chapter,chapterIndex:chapterIndex,
       extraction:extraction,verified:verified,providerResult:res,now:opts.now});
     var cs=LLMProposalBridge.propose({chapterId:chapterId,chapter:chapter,chapterIndex:chapterIndex,
-      extraction:extraction,verified:verified,providerResult:res,options:opts});
-    var out2={source:'llm',chapterId:chapterId,analysis:StoryEngine.analyzeChapter(chapterId,{now:opts.now}),
+      extraction:extraction,verified:verified,providerResult:res,options:opts,
+      promptHash:String(opts.promptHash||'')});
+    if(cs)cs.auditId=auditId;
+    var out2={source:'llm',chapterId:chapterId,auditId:auditId,promptHash:promptHash,
+      contextReport:opts.contextReport||null,
+      analysis:StoryEngine.analyzeChapter(chapterId,{now:opts.now}),
       extraction:extraction,providerResult:res,changeSet:cs,drafts:built.drafts,rejectedFacts:built.rejected,
       evidenceRejected:evidenceRejected,errors:[],fallback:false,reason:'',llmEnabled:true,
       summary:{provider:res.provider,model:res.model,requestId:res.requestId,latencyMs:res.latencyMs,usage:res.usage,
@@ -4705,6 +5389,48 @@ var LLMChapterAnalysis={
     LLMChapterAnalysis.lastResult=out2;
     return out2;
   },
+  // ===== Phase 6: Copilot 流式分析（buffer → ProviderResult → validation → proposal；流式途中绝不写 StoryState）=====
+  runStream:function(chapterId,options,onChunk){
+    var opts=options||{};
+    var chapter=StoryStore.getChapter(chapterId);
+    if(!chapter)return null;
+    var cfg=ProviderRuntime.config(opts);
+    LLMStreamState={active:true,buffer:'',chunks:0,task:'chapter_extraction',chapterId:String(chapterId),
+      startedAt:(typeof opts.now==='number')?opts.now:Date.now(),finishedAt:0,aborted:false,error:null};
+    var provider=ProviderRuntime.resolve(opts);
+    if(!provider){
+      LLMStreamState.active=false;LLMStreamState.finishedAt=Date.now();
+      var det=LLMChapterAnalysis.analyzeChapter(chapterId,opts);
+      det.streamed=true;det.streamState={chunks:0,bufferLength:0,aborted:false};
+      return det;
+    }
+    var built=StoryContextBuilder.buildExtractionContext(String(chapterId),
+      {maxInputTokens:cfg.maxInputTokens,reserveOutputTokens:cfg.maxOutputTokens});
+    var wrapped=function(c){
+      LLMStreamState.chunks++;
+      LLMStreamState.buffer+=String((c&&c.delta)||'');
+      if(typeof onChunk==='function')onChunk(c,LLMStreamState);
+    };
+    var res=ProviderRuntime.stream(provider,{input:String(chapter.content||''),context:built.prompt.context,
+      chapterId:String(chapterId),task:'chapter_extraction',system:built.prompt.system,promptHash:built.prompt.promptHash},
+      wrapped,{schema:ChapterExtractionSchema,promptHash:built.prompt.promptHash,timeoutMs:cfg.timeoutMs,
+        maxRetries:cfg.maxRetries,maxTokens:cfg.maxTokens,signal:opts.signal});
+    function done(r){
+      LLMStreamState.active=false;
+      LLMStreamState.finishedAt=Date.now();
+      LLMStreamState.error=r&&r.error?r.error:null;
+      LLMStreamState.aborted=!!(r&&r.error&&r.error.code==='CANCELLED');
+      var out=LLMChapterAnalysis.finish(chapterId,chapter,StoryStore.getChapters().indexOf(chapter),r,
+        {provider:provider,config:opts.config,promptHash:built.prompt.promptHash,contextReport:built.report},
+        function(reason,pr,errs){return LLMChapterAnalysis.analyzeChapter(chapterId,opts);});
+      out.streamed=true;
+      out.streamState={chunks:LLMStreamState.chunks,bufferLength:LLMStreamState.buffer.length,aborted:LLMStreamState.aborted};
+      return out;
+    }
+    if(isThenable(res))return res.then(done);
+    return done(res);
+  },
+
   // 真实 LLM 产生的变更集只能由"人"批准：系统批准人一律拒绝
   applyApproved:function(changeSet,approver,options){
     if(!changeSet)return{ok:false,status:'REJECTED',errors:['changeSet: required']};
@@ -4732,6 +5458,877 @@ AIRuntime.LLMProposalBridge=LLMProposalBridge;
 AIRuntime.LLMChapterAnalysis=LLMChapterAnalysis;
 AIRuntime.revalidateEvidence=revalidateEvidence;
 AIRuntime.normalizeChapterExtraction=normalizeChapterExtraction;
+
+// ===== Phase 6: MemoryIndex（派生索引，可丢弃重建；绝不成为第二事实来源）=====
+function normalizeToken(text){
+  return String(text==null?'':text).toLowerCase()
+    .replace(/[\s、,，。.;；:：!！?？"'“”‘’()（）\[\]【】<>《》\-—_/\\|+=*&^%$#@~`]/g,' ')
+    .replace(/\s+/g,' ').trim();
+}
+function bigramsOf(text){
+  var t=normalizeToken(text).replace(/ /g,'');
+  var out=[];
+  for(var i=0;i<t.length-1;i++)out.push(t.slice(i,i+2));
+  if(t.length===1)out.push(t);
+  return out;
+}
+var MemoryIndex=(function(){
+  var _index=null,_rev=-1,_sig='';
+  function signature(s){
+    var chapters=s.chapters||[];
+    var locs=(s.world&&s.world.locations)?s.world.locations:(s.locations||[]);
+    return [chapters.length,(s.characters||[]).length,locs.length,(s.foreshadowing||[]).length,
+      (s.conflicts||[]).length,(s.relationships||[]).length,(s.timeline||[]).length,
+      chapters.map(function(c){return String(c.content||'').length;}).join('.')].join('|');
+  }
+  function item(type,id,text,extra){
+    var it={type:type,id:String(id||''),text:String(text||''),chapterId:(extra&&extra.chapterId)||'',chapterIndex:(extra&&extra.chapterIndex===undefined?-1:extra.chapterIndex)};
+    if(extra)Object.keys(extra).forEach(function(k){it[k]=extra[k];});
+    return it;
+  }
+  function build(){
+    var s=StoryStore.snapshot();
+    var idx={builtAt:Date.now(),revision:StoryStore.getRevision(),byKey:{},postings:{},
+      chapters:{},characters:{},locations:{},events:{},foreshadowing:{},timeline:{},aliasToCharacter:{},
+      counts:{chapters:0,characters:0,locations:0,events:0,foreshadowing:0,timeline:0,relationships:0,summaries:0}};
+    function put(it){
+      var key=it.type+':'+it.id;
+      idx.byKey[key]=it;
+      bigramsOf(it.text).forEach(function(g){(idx.postings[g]=idx.postings[g]||[]).push(key);});
+    }
+    s.chapters.forEach(function(c,i){
+      idx.chapters[c.id]=item('chapter',c.id,String(c.title||'')+'\n'+String(c.content||''),{chapterId:c.id,chapterIndex:i,title:c.title||''});
+      put(idx.chapters[c.id]);idx.counts.chapters++;
+      (c.aiAnalysis&&c.aiAnalysis.events?c.aiAnalysis.events:[]).forEach(function(ev,k){
+        var id=c.id+':event:'+k;
+        idx.events[id]=item('event',id,String(ev),{chapterId:c.id,chapterIndex:i});
+        put(idx.events[id]);idx.counts.events++;
+      });
+    });
+    s.characters.forEach(function(c){
+      var text=[c.name,(c.aliases||[]).join(' '),(c.tags||[]).join(' '),c.charType,
+        (c.fields&&c.fields.personality)||'',(c.fields&&c.fields.ability)||'',(c.fields&&c.fields.goal)||''].join(' ');
+      idx.characters[c.id]=item('character',c.id,text,{name:c.name,charType:c.charType,
+        appearCount:(c.presence&&c.presence.appearCount)||0,aliases:(c.aliases||[]).slice()});
+      put(idx.characters[c.id]);idx.counts.characters++;
+      [c.name].concat(c.aliases||[]).concat((c.fields&&c.fields.aliases)||[]).forEach(function(a){
+        var n=normalizeToken(a);
+        if(n&&!idx.aliasToCharacter[n])idx.aliasToCharacter[n]=c.id;
+      });
+    });
+    (s.world&&s.world.locations?s.world.locations:[]).forEach(function(l){
+      idx.locations[l.id]=item('location',l.id,[l.name,l.description||''].join(' '),{name:l.name});
+      put(idx.locations[l.id]);idx.counts.locations++;
+    });
+    s.foreshadowing.forEach(function(f){
+      var chIdx=-1;
+      s.chapters.forEach(function(c,i){if(i===f.chapterPlaced)chIdx=i;});
+      idx.foreshadowing[f.id]=item('foreshadow',f.id,[f.content,f.note||''].join(' '),
+        {status:f.status,chapterPlaced:f.chapterPlaced,chapterExpected:f.chapterExpected,chapterIndex:chIdx});
+      put(idx.foreshadowing[f.id]);idx.counts.foreshadowing++;
+    });
+    s.timeline.forEach(function(t,i){
+      var id=t.id||('timeline_'+i);
+      idx.timeline[id]=item('timeline',id,[t.time||'',t.event||''].join(' '),{time:t.time||''});
+      put(idx.timeline[id]);idx.counts.timeline++;
+    });
+    (s.relationships||[]).forEach(function(r){
+      var id=r.id||('rel_'+r.fromId+'_'+r.toId);
+      idx.byKey['relationship:'+id]=item('relationship',id,[r.fromId,r.toId,r.type||''].join(' '),{fromId:r.fromId,toId:r.toId});
+      idx.counts.relationships++;
+    });
+    var summaries=(s.narrative_state&&s.narrative_state.chapterSummaries)||{};
+    Object.keys(summaries).forEach(function(cid){
+      var sum=summaries[cid];
+      idx.byKey['summary:'+cid]=item('summary',cid,[sum.summary||'',(sum.keyFacts||[]).join(' '),(sum.events||[]).join(' ')].join(' '),
+        {chapterId:cid,sourceHash:sum.sourceHash,generatedBy:sum.generatedBy,valid:ChapterSummary.isValid(sum)});
+      idx.counts.summaries++;
+    });
+    var volumes=(s.narrative_state&&s.narrative_state.volumeSummaries)||{};
+    Object.keys(volumes).forEach(function(vid){
+      idx.byKey['volume:'+vid]=item('volume',vid,[volumes[vid].summary||''].join(' '),{volumeId:vid});
+    });
+    var volKeys=(s.narrative_state&&s.narrative_state.volumeSummaries)||{};
+    idx.counts.volumes=Object.keys(volKeys).length;
+    _index=idx;_rev=StoryStore.getRevision();_sig=signature(s);
+    return idx;
+  }
+  function ensure(){
+    var s=StoryStore.state;
+    if(_index&&_rev===StoryStore.getRevision()&&_sig===signature(s))return _index;
+    return build();
+  }
+  return{
+    rebuild:function(){return build();},
+    ensure:ensure,
+    get:function(){return ensure();},
+    invalidate:function(){_index=null;_rev=-1;_sig='';return true;},
+    stats:function(){
+      var idx=ensure();
+      return{revision:idx.revision,builtAt:idx.builtAt,counts:idx.counts,
+        postings:Object.keys(idx.postings).length,items:Object.keys(idx.byKey).length,cached:_index===idx};
+    },
+    counts:function(){return ensure().counts;},
+    // 混合检索：exact match + keyword + normalized token(bigram) + entity reference（确定性排序）
+    search:function(query,options){
+      var opts=options||{};
+      var idx=ensure();
+      var q=String(query==null?'':query);
+      var results={};
+      function bump(key,score,reason){
+        if(!results[key])results[key]={key:key,score:0,reasons:[]};
+        results[key].score+=score;
+        if(reason&&results[key].reasons.indexOf(reason)<0)results[key].reasons.push(reason);
+      }
+      var typeFilter=opts.types?(Array.isArray(opts.types)?opts.types:[opts.types]):null;
+      // 1) 实体引用
+      var resolved=null;
+      try{resolved=StoryEngine.resolveEntity(q);}catch(e){resolved=null;}
+      if(resolved&&resolved.status==='resolved'&&resolved.entityRef){
+        var key=resolved.entityRef.entityType+':'+resolved.entityRef.entityId;
+        if(idx.byKey[key])bump(key,10,'entity:'+resolved.matchedBy);
+      }
+      var nq=normalizeToken(q);
+      if(nq){
+        // 2) exact / 包含匹配
+        Object.keys(idx.byKey).forEach(function(k){
+          var it=idx.byKey[k];
+          var nt=normalizeToken(it.text);
+          if(!nt)return;
+          if(nt===nq)bump(k,8,'exact');
+          else if(q.length>=2&&it.text.indexOf(q)>=0)bump(k,5,'substring');
+        });
+        // 3) bigram / 关键词
+        bigramsOf(q).forEach(function(g){
+          (idx.postings[g]||[]).forEach(function(k){bump(k,1,'bigram:'+g);});
+        });
+      }
+      var items=Object.keys(results).map(function(k){
+        var r=results[k],it=idx.byKey[k];
+        return{type:it.type,id:it.id,score:r.score,source:(it.chapterId||it.type),excerpt:String(it.text||'').slice(0,80),
+          chapterId:it.chapterId||'',chapterIndex:(it.chapterIndex===undefined?-1:it.chapterIndex),
+          reasons:r.reasons.slice()};
+      }).filter(function(x){
+        if(opts.minScore&&x.score<opts.minScore)return false;
+        if(typeFilter&&typeFilter.indexOf(x.type)<0)return false;
+        return true;
+      }).sort(function(a,b){
+        if(b.score!==a.score)return b.score-a.score;
+        if(a.type!==b.type)return a.type<b.type?-1:1;
+        return a.id<b.id?-1:(a.id>b.id?1:0);
+      });
+      var limit=(typeof opts.limit==='number'&&opts.limit>0)?opts.limit:20;
+      return{query:q,total:items.length,items:items.slice(0,limit)};
+    },
+    // Memory Levels: L0 当前章节 / L1 最近章节 / L2 长期事实 / L3 历史摘要
+    levels:function(chapterIdx,options){
+      var opts=options||{};
+      var idx=ensure();
+      var s=StoryStore.snapshot();
+      var recent=(typeof opts.recent==='number')?opts.recent:3;
+      var L0=[],L1=[],L2=[],L3=[];
+      var ch=s.chapters[chapterIdx];
+      if(ch&&idx.chapters[ch.id])L0.push(idx.chapters[ch.id]);
+      for(var i=Math.max(0,chapterIdx-recent);i<chapterIdx;i++){
+        var c=s.chapters[i];
+        if(c&&idx.chapters[c.id])L1.push(idx.chapters[c.id]);
+      }
+      s.characters.forEach(function(c){if(idx.characters[c.id])L2.push(idx.characters[c.id]);});
+      s.foreshadowing.forEach(function(f){if(idx.foreshadowing[f.id])L2.push(idx.foreshadowing[f.id]);});
+      s.timeline.forEach(function(t,i){var id=t.id||('timeline_'+i);if(idx.timeline[id])L2.push(idx.timeline[id]);});
+      Object.keys(idx.byKey).forEach(function(k){
+        var it=idx.byKey[k];
+        if(it.type==='location'||it.type==='relationship'||it.type==='event')L2.push(it);
+        if(it.type==='summary'||it.type==='volume')L3.push(it);
+      });
+      function cost(list){return list.reduce(function(n,x){return n+ContextBudgeter.estimate(x.text);},0);}
+      return{L0:L0,L1:L1,L2:L2,L3:L3,
+        stats:{L0:{items:L0.length,estimatedTokens:cost(L0)},L1:{items:L1.length,estimatedTokens:cost(L1)},
+          L2:{items:L2.length,estimatedTokens:cost(L2)},L3:{items:L3.length,estimatedTokens:cost(L3)}}};
+    }
+  };
+})();
+
+// ===== Phase 6: ChapterSummary / VolumeSummary（派生数据；绑定 chapterId + sourceHash）=====
+var ChapterSummarySchema={
+  name:'ChapterSummary',
+  MAX_SUMMARY:600,
+  validate:function(obj){
+    var errors=[];
+    if(!obj||typeof obj!=='object'||Array.isArray(obj))return{valid:false,errors:['summary: expected object']};
+    if(typeof obj.summary!=='string'||!obj.summary.length)errors.push('summary: required string');
+    if(typeof obj.summary==='string'&&obj.summary.length>ChapterSummarySchema.MAX_SUMMARY)errors.push('summary: too long (>'+ChapterSummarySchema.MAX_SUMMARY+')');
+    ['keyFacts','characters','events','unresolved'].forEach(function(k){
+      if(obj[k]!==undefined&&!Array.isArray(obj[k]))errors.push(k+': expected array');
+    });
+    var fns=StoryContract.collectFunctionPaths(obj);
+    if(fns.length)errors.push('summary: executable values at '+fns.join(', '));
+    return{valid:errors.length===0,errors:errors};
+  }
+};
+var ChapterSummary={
+  CONTRACT_FIELDS:['chapterId','sourceHash','summary','keyFacts','characters','events','unresolved','generatedBy','generatedAt'],
+  hashOf:function(text){return StoryStore.hash(String(text==null?'':text));},
+  all:function(){return (StoryStore.getNarrativeState().chapterSummaries)||{};},
+  get:function(chapterId){return ChapterSummary.all()[String(chapterId)]||null;},
+  isValid:function(summary){
+    if(!summary||!summary.chapterId)return false;
+    var ch=StoryStore.getChapter(summary.chapterId);
+    if(!ch)return false;
+    return summary.sourceHash===ChapterSummary.hashOf(ch.content);
+  },
+  list:function(){
+    var all=ChapterSummary.all();
+    return Object.keys(all).sort().map(function(k){
+      var s=all[k];s.valid=ChapterSummary.isValid(s);return s;
+    });
+  },
+  // 确定性摘要（无 LLM 时）：只做结构化摘录，不虚构文学总结
+  deterministic:function(chapterId,options){
+    var opts=options||{};
+    var ch=StoryStore.getChapter(chapterId);
+    if(!ch)return null;
+    var text=String(ch.content||'');
+    var analysis=ch.aiAnalysis||{};
+    var chapters=StoryStore.getChapters();
+    var idx=chapters.indexOf(ch);
+    var opening=text.slice(0,40);
+    var ending=text.slice(Math.max(0,text.length-40));
+    var events=(analysis.events||[]).slice(0,6);
+    var chars=(analysis.characters||[]).slice(0,10);
+    var unresolved=StoryStore.getForeshadows().filter(function(f){return f.chapterPlaced===idx&&f.status==='pending';})
+      .map(function(f){return f.content;});
+    var summary='『'+(ch.title||('第'+(idx+1)+'章'))+'』开头：'+opening+
+      (events.length?('；事件：'+events.join('、')):'')+
+      (text?('；结尾：'+ending):'');
+    return{
+      chapterId:String(chapterId),
+      sourceHash:ChapterSummary.hashOf(text),
+      summary:summary.slice(0,ChapterSummarySchema.MAX_SUMMARY),
+      keyFacts:events.concat(unresolved),
+      characters:chars,
+      events:events,
+      unresolved:unresolved,
+      generatedBy:'deterministic',
+      generatedAt:(typeof opts.now==='number')?opts.now:Date.now()
+    };
+  },
+  // 存储派生数据也必须经 ChangeSet（唯一写入路径）
+  store:function(summary,options){
+    var opts=options||{};
+    if(!summary||!summary.chapterId)return null;
+    var path='narrative_state.chapterSummaries.'+summary.chapterId;
+    var current=ChapterSummary.get(summary.chapterId);
+    var cs=ChangeSetRuntime.propose({
+      source:String(opts.source||'ChapterSummary.store'),
+      operation:'store_chapter_summary',
+      reason:'保存章节摘要（派生数据）',
+      evidence:[],
+      changes:[{actionId:'summary:'+summary.chapterId,type:current?'update':'add',
+        target:{entityType:'chapter',entityId:summary.chapterId,displayName:summary.chapterId},
+        path:path,before:current,after:summary,
+        reason:'章节摘要（generatedBy='+summary.generatedBy+'）',evidence:[],confidence:0.9}],
+      baseStateHash:StoryStore.hash(StoryStore.state)
+    },opts);
+    cs.origin='derived';
+    if(opts.auditId)cs.auditId=opts.auditId;
+    if(summary.generatedBy==='llm'&&opts.providerResult){
+      var r=opts.providerResult;
+      cs.llm={provider:r.provider,model:r.model,requestId:r.requestId,
+        promptHash:opts.promptHash||'',usage:r.usage,latencyMs:r.latencyMs};
+    }
+    ChangeSetRuntime.validate(cs,opts);
+    if(!cs.status||cs.status!=='VALID')return{ok:false,changeSet:cs,errors:cs.errors||[]};
+    ChangeSetRuntime.approve(cs,String(opts.approver||'derived:chapter-summary'),opts);
+    var res=ChangeSetRuntime.apply(cs,opts);
+    return{ok:!!res.ok,changeSet:cs,errors:res.errors||[],verified:res.verification||null};
+  },
+  // 生成：LLM 可用则用模型（经 schema 校验），否则确定性摘要
+  generate:function(chapterId,options){
+    var opts=options||{};
+    var det=ChapterSummary.deterministic(chapterId,opts);
+    if(!det)return null;
+    var provider=ProviderRuntime.resolve(opts);
+    if(!provider)return{summary:det,source:'deterministic',providerResult:null,errors:[],store:opts.store===true?ChapterSummary.store(det,opts):null};
+    var ch=StoryStore.getChapter(chapterId);
+    var res=ProviderRuntime.complete(provider,{input:String(ch.content||''),chapterId:String(chapterId),task:'chapter_summary',
+      system:'你是章节摘要器。只输出 JSON：{"summary":"...","keyFacts":[],"characters":[],"events":[],"unresolved":[]}（不虚构情节）'},
+      {schema:ChapterSummarySchema,timeoutMs:opts.timeoutMs,maxRetries:opts.maxRetries,maxTokens:opts.maxTokens,
+        budget:{maxInputTokens:opts.maxInputTokens,maxOutputTokens:opts.maxOutputTokens},signal:opts.signal});
+    function finish(r){
+      if(!r||!r.success||!r.structured||!ChapterSummarySchema.validate(r.structured).valid){
+        return{summary:det,source:'deterministic',providerResult:r||null,errors:r&&r.error?[r.error]:[],
+          store:opts.store===true?ChapterSummary.store(det,opts):null};
+      }
+      var s=r.structured;
+      var llmSummary={chapterId:String(chapterId),sourceHash:ChapterSummary.hashOf(ch.content),
+        summary:String(s.summary).slice(0,ChapterSummarySchema.MAX_SUMMARY),
+        keyFacts:Array.isArray(s.keyFacts)?s.keyFacts.slice(0,20):[],
+        characters:Array.isArray(s.characters)?s.characters.slice(0,20):[],
+        events:Array.isArray(s.events)?s.events.slice(0,20):[],
+        unresolved:Array.isArray(s.unresolved)?s.unresolved.slice(0,20):[],
+        generatedBy:'llm',generatedAt:(typeof opts.now==='number')?opts.now:Date.now()};
+      return{summary:llmSummary,source:'llm',providerResult:r,errors:[],
+        store:opts.store===true?ChapterSummary.store(llmSummary,{source:'ChapterSummary.generate',providerResult:r,promptHash:res.requestId,auditId:opts.auditId,now:opts.now}):null};
+    }
+    if(isThenable(res))return res.then(finish);
+    return finish(res);
+  }
+};
+var VolumeSummary={
+  GROUP_SIZE:5,
+  keyFor:function(groupIndex){return 'volume_'+String(Number(groupIndex)+1);},
+  groupOf:function(chapterIdx){return Math.floor(Number(chapterIdx)/VolumeSummary.GROUP_SIZE);},
+  all:function(){return (StoryStore.getNarrativeState().volumeSummaries)||{};},
+  build:function(groupIndex,options){
+    var opts=options||{};
+    var chapters=StoryStore.getChapters();
+    var start=Number(groupIndex)*VolumeSummary.GROUP_SIZE;
+    var group=chapters.slice(start,start+VolumeSummary.GROUP_SIZE);
+    if(!group.length)return null;
+    var parts=[],facts=[],chars=[];
+    group.forEach(function(c,i){
+      var s=ChapterSummary.get(c.id);
+      if(s&&ChapterSummary.isValid(s)){parts.push(s.summary);facts=facts.concat(s.keyFacts||[]);chars=chars.concat(s.characters||[]);}
+      else parts.push('『'+(c.title||('第'+(start+i+1)+'章'))+'』'+(String(c.content||'').slice(0,40)));
+    });
+    var summary={
+      volumeId:VolumeSummary.keyFor(groupIndex),
+      groupIndex:Number(groupIndex),
+      chapterIds:group.map(function(c){return c.id;}),
+      chapterCount:group.length,
+      summary:('第'+(start+1)+'-'+(start+group.length)+'章：'+parts.join(' ')).slice(0,1200),
+      keyFacts:facts.slice(0,30),
+      characters:chars.filter(function(v,i){return chars.indexOf(v)===i;}).slice(0,30),
+      generatedBy:opts.generatedBy||'deterministic',
+      generatedAt:(typeof opts.now==='number')?opts.now:Date.now()
+    };
+    if(opts.store===true){
+      var path='narrative_state.volumeSummaries.'+summary.volumeId;
+      var current=VolumeSummary.all()[summary.volumeId]||null;
+      var cs=ChangeSetRuntime.propose({source:'VolumeSummary.build',operation:'store_volume_summary',
+        reason:'保存卷/篇摘要（派生数据）',evidence:[],
+        changes:[{actionId:'volume:'+summary.volumeId,type:current?'update':'add',
+          target:{entityType:'volume',entityId:summary.volumeId,displayName:summary.volumeId},
+          path:path,before:current,after:summary,reason:'卷摘要',evidence:[],confidence:0.9}],
+        baseStateHash:StoryStore.hash(StoryStore.state)},opts);
+      cs.origin='derived';
+      ChangeSetRuntime.validate(cs,opts);
+      ChangeSetRuntime.approve(cs,String(opts.approver||'derived:volume-summary'),opts);
+      var res=ChangeSetRuntime.apply(cs,opts);
+      summary._store={ok:!!res.ok,errors:res.errors||[],changeSetId:cs.changeSetId};
+    }
+    return summary;
+  },
+  buildAll:function(options){
+    var chapters=StoryStore.getChapters();
+    var n=Math.ceil(chapters.length/VolumeSummary.GROUP_SIZE);
+    var out=[];
+    for(var g=0;g<n;g++)out.push(VolumeSummary.build(g,options));
+    return out;
+  }
+};
+
+// ===== Phase 6: ContextBudgeter（estimate / allocate / trim / report；按优先级确定性裁剪）=====
+function cloneSection(s){
+  var out={};
+  Object.keys(s).forEach(function(k){out[k]=s[k];});
+  return out;
+}
+var ContextBudgeter={
+  DEFAULT_BUDGET:6000,
+  MIN_SECTION_TOKENS:20,
+  WEIGHTS:{hard:1,character:1,foreshadowing:1,arc:1,chapter:1,summary:1},
+  estimate:function(value){
+    if(value===null||value===undefined)return 0;
+    if(typeof value==='number')return Math.max(0,Math.ceil(value));
+    if(typeof value==='object')return estimateTokens(JSON.stringify(value));
+    return estimateTokens(String(value));
+  },
+  makeSection:function(name,priority,text,meta){
+    var s={name:String(name),priority:Number(priority)||0,text:String(text==null?'':text),
+      estimatedTokens:ContextBudgeter.estimate(String(text==null?'':text)),included:true,truncated:false,reason:''};
+    if(meta)Object.keys(meta).forEach(function(k){s[k]=meta[k];});
+    return s;
+  },
+  TRUNCATION_MARKER:'…[truncated]',
+  // 截断标记本身也必须计入预算，否则裁剪后会超预算并误伤高优先级分段
+  cutToTokens:function(text,tokens){
+    var str=String(text==null?'':text);
+    var maxChars=Math.max(0,Math.floor(tokens*2));
+    if(maxChars>=str.length)return str;
+    var marker=ContextBudgeter.TRUNCATION_MARKER;
+    var keep=Math.max(0,maxChars-marker.length);
+    var out=str.slice(0,keep)+marker;
+    var guard=0;
+    while(ContextBudgeter.estimate(out)>tokens&&out.length>marker.length&&guard<64){
+      keep=Math.max(0,keep-2);
+      out=str.slice(0,keep)+marker;
+      guard++;
+    }
+    return out;
+  },
+  // 确定性裁剪：从最低优先级开始，先截断、再丢弃；绝不随机
+  trim:function(sections,budget){
+    var list=(Array.isArray(sections)?sections:[]).map(cloneSection);
+    var b=(typeof budget==='number'&&budget>0)?budget:ContextBudgeter.DEFAULT_BUDGET;
+    var removed=[];
+    function used(){return list.reduce(function(n,s){return n+(s.included?s.estimatedTokens:0);},0);}
+    var order=list.slice().sort(function(a,c){
+      if(c.priority!==a.priority)return c.priority-a.priority;
+      return a.name<c.name?-1:(a.name>c.name?1:0);
+    });
+    for(var i=0;i<order.length;i++){
+      if(used()<=b)break;
+      var ref=order[i];
+      var target=null;
+      for(var j=0;j<list.length;j++){if(list[j].name===ref.name)target=list[j];}
+      if(!target||!target.included)continue;
+      var others=used()-target.estimatedTokens;
+      var allowed=b-others;
+      if(allowed<ContextBudgeter.MIN_SECTION_TOKENS){
+        target.included=false;target.truncated=true;target.text='';target.estimatedTokens=0;
+        target.reason='budget: dropped（优先级最低）';
+        removed.push(target.name);
+        continue;
+      }
+      var cut=ContextBudgeter.cutToTokens(target.text,allowed);
+      target.text=cut;
+      target.estimatedTokens=ContextBudgeter.estimate(cut);
+      target.truncated=true;
+      target.reason='budget: truncated to '+allowed+' tokens';
+    }
+    var total=list.reduce(function(n,s){return n+s.estimatedTokens;},0);
+    var kept=list.filter(function(s){return s.included;}).reduce(function(n,s){return n+s.estimatedTokens;},0);
+    return{sections:list,budget:b,effectiveBudget:b,usedTokens:kept,totalEstimatedTokens:total,
+      truncated:list.some(function(s){return s.truncated;}),removed:removed};
+  },
+  allocate:function(sections,options){
+    var opts=options||{};
+    var budget=(typeof opts.maxInputTokens==='number'&&opts.maxInputTokens>0)?opts.maxInputTokens:ContextBudgeter.DEFAULT_BUDGET;
+    var reserve=(typeof opts.reserveOutputTokens==='number')?opts.reserveOutputTokens:0;
+    var effective=Math.max(ContextBudgeter.MIN_SECTION_TOKENS,budget-reserve);
+    var out=ContextBudgeter.trim(sections,effective);
+    out.budget=budget;
+    out.reserveOutputTokens=reserve;
+    out.effectiveBudget=effective;
+    return out;
+  },
+  report:function(allocation){
+    var a=allocation||{sections:[],budget:ContextBudgeter.DEFAULT_BUDGET,usedTokens:0,totalEstimatedTokens:0,truncated:false,removed:[]};
+    return{
+      totalEstimatedTokens:a.totalEstimatedTokens,
+      budget:a.budget,
+      usedTokens:a.usedTokens,
+      reserveOutputTokens:a.reserveOutputTokens||0,
+      effectiveBudget:(typeof a.effectiveBudget==='number')?a.effectiveBudget:a.budget,
+      truncated:!!a.truncated,
+      removed:(a.removed||[]).slice(),
+      sections:(a.sections||[]).map(function(s){
+        return{name:s.name,priority:s.priority,estimatedTokens:s.estimatedTokens,included:s.included,
+          truncated:!!s.truncated,reason:s.reason||''};
+      })
+    };
+  },
+  join:function(allocation){
+    var a=allocation||{sections:[]};
+    return (a.sections||[]).filter(function(s){return s.included;})
+      .slice().sort(function(x,y){
+        if(x.priority!==y.priority)return x.priority-y.priority;
+        return x.name<y.name?-1:(x.name>y.name?1:0);
+      })
+      .map(function(s){return '## '+s.name+'\n'+s.text;}).join('\n\n');
+  }
+};
+
+// ===== Phase 6: StoryContextBuilder（不同任务 → 不同上下文；共享同一状态投影）=====
+var StoryContextBuilder={
+  TASKS:{EXTRACTION:'chapter_extraction',CONSISTENCY:'consistency_check',WRITING:'writing_assist',COPILOT:'copilot_analysis',SUMMARY:'chapter_summary'},
+  // 单一状态投影：所有任务共享，禁止复制多套数据逻辑
+  projectState:function(){
+    var s=StoryStore.snapshot();
+    return{meta:s.meta||{},chapters:s.chapters||[],characters:s.characters||[],
+      foreshadowing:s.foreshadowing||[],timeline:s.timeline||[],relationships:s.relationships||[],
+      world:s.world||{setting:{},locations:[],factions:[],rules:[]},narrative_state:s.narrative_state||{}};
+  },
+  chapterOf:function(p,chapterIdOrIdx){
+    if(typeof chapterIdOrIdx==='number')return{chapter:p.chapters[chapterIdOrIdx]||null,index:chapterIdOrIdx};
+    var out={chapter:null,index:-1};
+    p.chapters.forEach(function(c,i){if(String(c.id)===String(chapterIdOrIdx)){out.chapter=c;out.index=i;}});
+    return out;
+  },
+  renderCharacters:function(list){
+    return list.map(function(c){
+      var fields=c.fields||{};
+      return '- '+c.id+' '+c.name+'（'+(c.charType||'')+'）'+
+        (c.aliases&&c.aliases.length?(' 别名:'+c.aliases.join('/')):'')+
+        (fields.personality?(' 性格:'+fields.personality):'')+
+        (fields.ability?(' 能力:'+fields.ability):'')+
+        (fields.goal?(' 目标:'+fields.goal):'')+
+        ' 出场:'+(((c.presence||{}).appearCount)||0);
+    }).join('\n')||'(无)';
+  },
+  renderChapter:function(ch,index){
+    return '【第'+(index+1)+'章 '+(ch.title||'')+'】\n'+String(ch.content||'');
+  },
+  renderForeshadows:function(list){
+    return list.map(function(f){return '- '+f.id+' '+f.content+'（埋设:'+f.chapterPlaced+' 预期:'+f.chapterExpected+' 状态:'+f.status+'）';}).join('\n')||'(无)';
+  },
+  renderTimeline:function(list){
+    return list.slice(-10).map(function(t){return '- '+(t.time||'')+' '+(t.event||'');}).join('\n')||'(无)';
+  },
+  renderRelationships:function(list,chars){
+    function name(id){var c=chars.filter(function(x){return x.id===id;})[0];return c?c.name:id;}
+    return list.map(function(r){return '- '+name(r.fromId)+' → '+name(r.toId)+' ('+(r.type||'')+')';}).join('\n')||'(无)';
+  },
+  renderWorld:function(world){
+    var out=[];
+    if(world.setting)Object.keys(world.setting).forEach(function(k){out.push('- '+k+': '+world.setting[k]);});
+    (world.rules||[]).forEach(function(r){out.push('- 规则 '+(r.id||'')+': '+(r.text||''));});
+    (world.locations||[]).forEach(function(l){out.push('- 地点 '+(l.name||'')+' '+((l.description)||''));});
+    return out.join('\n')||'(无)';
+  },
+  // 按 Rule 所需事实选择上下文（Consistency 用）
+  factsForRules:function(ruleIds,p,chapterIdx){
+    var rules=Array.isArray(ruleIds)?ruleIds:[];
+    var ctx=buildAIContext(Math.max(0,chapterIdx));
+    var lines=[];
+    rules.forEach(function(id){
+      if(id==='power_level_conflict'){
+        lines.push('规则 '+id+' 需要：主角能力='+((ctx.analysis.realm.protagonist&&ctx.analysis.realm.protagonist.ability)||'未标注')+
+          '，章节数='+ctx.analysis.realm.chapterCount+'，当前允许上限='+(REALM_LADDER[ctx.analysis.realm.ceiling]||'-'));
+      }else if(id==='arc_stagnation'){
+        var a=ctx.analysis.arc.protagonist||{};
+        lines.push('规则 '+id+' 需要：主角='+(a.name||'-')+' arcStage='+(a.arcStage||'未标注')+
+          ' 已出现='+(a.appearCount||0)+' 次 章节数='+ctx.analysis.arc.chapterCount);
+      }else if(id==='character_inconsistency'){
+        (ctx.analysis.characterInsights||[]).forEach(function(i){
+          lines.push('规则 '+id+' 需要：'+i.name+' 一致性评分='+i.score+(i.reasons.length?('（'+i.reasons.join('、')+'）'):''));
+        });
+      }else if(id==='world_rule_conflict'){
+        var world=p.world||{};
+        lines.push('规则 '+id+' 需要：世界观规则 '+((world.rules||[]).length)+' 条，地点 '+((world.locations||[]).length)+' 个');
+      }else if(id==='timeline_conflict'){
+        lines.push('规则 '+id+' 需要：时间线 '+p.timeline.length+' 条');
+      }else if(id==='foreshadow_overdue'){
+        lines.push('规则 '+id+' 需要：未回收伏笔 '+p.foreshadowing.filter(function(f){return f.status==='pending';}).length+' 条');
+      }else if(id==='relationship_inconsistency'){
+        lines.push('规则 '+id+' 需要：关系 '+(p.relationships||[]).length+' 条');
+      }else{
+        lines.push('规则 '+id+' 需要：当前章节事实与实体索引');
+      }
+    });
+    return lines.join('\n')||'(无)';
+  },
+  buildPrompt:function(task,allocation,options){
+    var opts=options||{};
+    var system=opts.system||'你是小说叙事分析助手，只输出 JSON，不得编造原文中不存在的内容。';
+    var instructions=opts.instructions||'';
+    var context=ContextBudgeter.join(allocation);
+    var taskKey=String(task);
+    var promptHash=StoryStore.hash({system:system,task:taskKey,context:context,instructions:instructions});
+    return{system:system,instructions:instructions,context:context,
+      user:(instructions?instructions+'\n\n':'')+context,
+      promptHash:promptHash,
+      estimatedTokens:ContextBudgeter.estimate(system+'\n'+instructions+'\n'+context)};
+  },
+  finish:function(task,chapterIdOrIdx,allocation,options){
+    var opts=options||{};
+    var prompt=StoryContextBuilder.buildPrompt(task,allocation,opts);
+    var report=ContextBudgeter.report(allocation);
+    var idx=(typeof chapterIdOrIdx==='number')?chapterIdOrIdx:(-1);
+    var chapterId='';
+    if(typeof chapterIdOrIdx!=='number'){
+      chapterId=String(chapterIdOrIdx||'');
+    }else{
+      var ch=StoryStore.getChapterByIdx(chapterIdOrIdx);
+      chapterId=ch?ch.id:'';
+    }
+    return{task:task,chapterId:chapterId,chapterIdx:idx,sections:allocation.sections,
+      report:report,allocation:allocation,prompt:prompt,promptHash:prompt.promptHash};
+  },
+  // ① 抽取上下文：当前章节 + 必要角色索引 + 必要世界设定 + 必要伏笔
+  buildExtractionContext:function(chapterIdOrIdx,options){
+    var opts=options||{};
+    var p=StoryContextBuilder.projectState();
+    var loc=StoryContextBuilder.chapterOf(p,chapterIdOrIdx);
+    var ch=loc.chapter||{};
+    var parsed=(ch.aiAnalysis&&ch.aiAnalysis.characters)||[];
+    var relevant=p.characters.filter(function(c){
+      return parsed.indexOf(c.name)>=0||c.charType==='protagonist';
+    });
+    if(relevant.length<(opts.minCharacters||3)){
+      p.characters.slice(0,opts.minCharacters||3).forEach(function(c){
+        if(!relevant.some(function(x){return x.id===c.id;}))relevant.push(c);
+      });
+    }
+    var pending=p.foreshadowing.filter(function(f){return f.status==='pending';});
+    var sections=[
+      ContextBudgeter.makeSection('chapter',0,StoryContextBuilder.renderChapter(ch,loc.index<0?0:loc.index),{kind:'chapter'}),
+      ContextBudgeter.makeSection('characters',1,StoryContextBuilder.renderCharacters(relevant),{kind:'characters',count:relevant.length}),
+      ContextBudgeter.makeSection('locations',2,StoryContextBuilder.renderWorld({setting:{},rules:[],locations:p.world.locations||[]}),{kind:'locations'}),
+      ContextBudgeter.makeSection('foreshadowing',3,StoryContextBuilder.renderForeshadows(pending),{kind:'foreshadowing',count:pending.length}),
+      ContextBudgeter.makeSection('worldRules',4,StoryContextBuilder.renderWorld({setting:p.world.setting||{},rules:p.world.rules||[],locations:[]}),{kind:'world'})
+    ];
+    var allocation=ContextBudgeter.allocate(sections,opts);
+    return StoryContextBuilder.finish(StoryContextBuilder.TASKS.EXTRACTION,chapterIdOrIdx,allocation,opts);
+  },
+  // ② 一致性上下文：当前章节 + 相关实体历史 + 时间线 + 伏笔 + 关系 + 世界规则（规则驱动）
+  buildConsistencyContext:function(chapterIdOrIdx,options){
+    var opts=options||{};
+    var p=StoryContextBuilder.projectState();
+    var loc=StoryContextBuilder.chapterOf(p,chapterIdOrIdx);
+    var ch=loc.chapter||{};
+    var ruleIds=opts.rules||[];
+    var sections=[
+      ContextBudgeter.makeSection('chapter',0,StoryContextBuilder.renderChapter(ch,loc.index<0?0:loc.index),{kind:'chapter'}),
+      ContextBudgeter.makeSection('ruleFacts',1,StoryContextBuilder.factsForRules(ruleIds,p,loc.index<0?0:loc.index),{kind:'ruleFacts',rules:ruleIds}),
+      ContextBudgeter.makeSection('entities',2,StoryContextBuilder.renderCharacters(p.characters),{kind:'characters',count:p.characters.length}),
+      ContextBudgeter.makeSection('timeline',3,StoryContextBuilder.renderTimeline(p.timeline),{kind:'timeline',count:p.timeline.length}),
+      ContextBudgeter.makeSection('foreshadowing',4,StoryContextBuilder.renderForeshadows(p.foreshadowing),{kind:'foreshadowing',count:p.foreshadowing.length}),
+      ContextBudgeter.makeSection('relationships',5,StoryContextBuilder.renderRelationships(p.relationships||[],p.characters),{kind:'relationships'}),
+      ContextBudgeter.makeSection('worldRules',6,StoryContextBuilder.renderWorld(p.world),{kind:'world'})
+    ];
+    var allocation=ContextBudgeter.allocate(sections,opts);
+    return StoryContextBuilder.finish(StoryContextBuilder.TASKS.CONSISTENCY,chapterIdOrIdx,allocation,opts);
+  },
+  // ③ 写作上下文：P0 硬设定 / P1 当前角色 / P2 未回收伏笔 / P3 当前弧 / P4 最近章节 / P5 更早摘要
+  buildWritingContext:function(chapterIdOrIdx,options){
+    var opts=options||{};
+    var p=StoryContextBuilder.projectState();
+    var loc=StoryContextBuilder.chapterOf(p,chapterIdOrIdx);
+    var idx=loc.index<0?0:loc.index;
+    var recentCount=(typeof opts.recentChapters==='number')?opts.recentChapters:3;
+    var protagonist=p.characters.filter(function(c){return c.charType==='protagonist';})[0];
+    var cast=p.characters.filter(function(c){return c.charType==='protagonist'||(c.presence&&c.presence.appearCount>0);});
+    var pending=p.foreshadowing.filter(function(f){return f.status==='pending';});
+    var recent=[];
+    for(var i=Math.max(0,idx-recentCount);i<idx;i++){
+      var c=p.chapters[i];
+      if(!c)continue;
+      var sum=ChapterSummary.get(c.id);
+      recent.push('【第'+(i+1)+'章 '+(c.title||'')+'】'+((sum&&ChapterSummary.isValid(sum))?sum.summary:String(c.content||'').slice(0,120)));
+    }
+    var earlier=[];
+    p.chapters.slice(0,Math.max(0,idx-recentCount)).forEach(function(c){
+      var sum=ChapterSummary.get(c.id);
+      if(sum&&ChapterSummary.isValid(sum))earlier.push(sum.summary);
+    });
+    (VolumeSummary.all?Object.keys(VolumeSummary.all()):[]).forEach(function(v){
+      var vs=VolumeSummary.all()[v];
+      if(vs&&vs.summary)earlier.push(vs.summary);
+    });
+    var arc=p.narrative_state.currentArc||'';
+    var sections=[
+      ContextBudgeter.makeSection('hardFacts',0,StoryContextBuilder.renderWorld({setting:p.world.setting||{},rules:p.world.rules||[],locations:p.world.locations||[]}),{kind:'world'}),
+      ContextBudgeter.makeSection('characters',1,StoryContextBuilder.renderCharacters(cast),{kind:'characters',count:cast.length}),
+      ContextBudgeter.makeSection('foreshadowing',2,StoryContextBuilder.renderForeshadows(pending),{kind:'foreshadowing',count:pending.length}),
+      ContextBudgeter.makeSection('currentArc',3,'当前弧：'+(arc||'未标注')+'\n主角：'+((protagonist&&protagonist.name)||'未设定')+
+        (protagonist&&protagonist.aiProfile&&protagonist.aiProfile.arcStage?('（阶段:'+protagonist.aiProfile.arcStage+'）'):''),{kind:'arc'}),
+      ContextBudgeter.makeSection('recentChapters',4,recent.join('\n\n'),{kind:'chapters',count:recent.length}),
+      ContextBudgeter.makeSection('summaries',5,earlier.join('\n\n'),{kind:'summaries',count:earlier.length})
+    ];
+    var allocation=ContextBudgeter.allocate(sections,opts);
+    return StoryContextBuilder.finish(StoryContextBuilder.TASKS.WRITING,chapterIdOrIdx,allocation,opts);
+  },
+  // ④ Copilot 上下文：当前章节 + 角色 + 伏笔 + 诊断结论 + 世界规则
+  buildCopilotContext:function(chapterIdOrIdx,options){
+    var opts=options||{};
+    var p=StoryContextBuilder.projectState();
+    var loc=StoryContextBuilder.chapterOf(p,chapterIdOrIdx);
+    var ch=loc.chapter||{};
+    var diagnosis='';
+    try{
+      var report=AIRuntime.consistencyReport(loc.index<0?0:loc.index);
+      diagnosis=report.issues.map(function(i){return '- ['+i.severity+'] '+i.ruleId+': '+i.message;}).join('\n')||'(无问题)';
+    }catch(e){diagnosis='(诊断不可用)';}
+    var sections=[
+      ContextBudgeter.makeSection('chapter',0,StoryContextBuilder.renderChapter(ch,loc.index<0?0:loc.index),{kind:'chapter'}),
+      ContextBudgeter.makeSection('characters',1,StoryContextBuilder.renderCharacters(p.characters),{kind:'characters',count:p.characters.length}),
+      ContextBudgeter.makeSection('foreshadowing',2,StoryContextBuilder.renderForeshadows(p.foreshadowing.filter(function(f){return f.status==='pending';})),{kind:'foreshadowing'}),
+      ContextBudgeter.makeSection('diagnosis',3,diagnosis,{kind:'diagnosis'}),
+      ContextBudgeter.makeSection('worldRules',4,StoryContextBuilder.renderWorld(p.world),{kind:'world'})
+    ];
+    var allocation=ContextBudgeter.allocate(sections,opts);
+    return StoryContextBuilder.finish(StoryContextBuilder.TASKS.COPILOT,chapterIdOrIdx,allocation,opts);
+  },
+  build:function(task,chapterIdOrIdx,options){
+    var t=String(task||'');
+    if(t===StoryContextBuilder.TASKS.EXTRACTION)return StoryContextBuilder.buildExtractionContext(chapterIdOrIdx,options);
+    if(t===StoryContextBuilder.TASKS.CONSISTENCY)return StoryContextBuilder.buildConsistencyContext(chapterIdOrIdx,options);
+    if(t===StoryContextBuilder.TASKS.WRITING)return StoryContextBuilder.buildWritingContext(chapterIdOrIdx,options);
+    if(t===StoryContextBuilder.TASKS.COPILOT)return StoryContextBuilder.buildCopilotContext(chapterIdOrIdx,options);
+    return StoryContextBuilder.buildExtractionContext(chapterIdOrIdx,options);
+  }
+};
+
+// ===== Phase 6: AI Audit Store（AI 操作历史；独立本机存储；绝不成为故事事实）=====
+var AI_AUDIT_KEY='novelcraft_ai_audit_v1';
+var AIAuditStore={
+  KEY:AI_AUDIT_KEY,MAX:100,
+  FORBIDDEN:['apikey','api_key','authorization','token','password','secret','bearer'],
+  sanitize:function(value,depth){
+    var d=(typeof depth==='number')?depth:0;
+    if(d>6)return null;
+    if(value===null||value===undefined)return null;
+    if(typeof value==='string')return value.length>20000?(value.slice(0,20000)+'…[audit truncated]'):value;
+    if(typeof value==='number'||typeof value==='boolean')return value;
+    if(Array.isArray(value))return value.slice(0,200).map(function(v){return AIAuditStore.sanitize(v,d+1);});
+    if(typeof value==='object'){
+      var out={};
+      Object.keys(value).forEach(function(k){
+        if(AIAuditStore.FORBIDDEN.indexOf(String(k).toLowerCase())>=0)return;
+        out[k]=AIAuditStore.sanitize(value[k],d+1);
+      });
+      return out;
+    }
+    return null;
+  },
+  _load:function(){
+    try{var raw=localStorage.getItem(AI_AUDIT_KEY);var arr=raw?JSON.parse(raw):[];return Array.isArray(arr)?arr:[];}
+    catch(e){return[];}
+  },
+  _save:function(list){
+    var trimmed=list.slice(-AIAuditStore.MAX);
+    try{localStorage.setItem(AI_AUDIT_KEY,JSON.stringify(trimmed));}catch(e){}
+    return trimmed.length;
+  },
+  linkChangeSet:function(auditId,changeSetId){
+    var list=AIAuditStore._load();
+    var found=null;
+    list.forEach(function(e){if(e.auditId===auditId){e.changeSetId=String(changeSetId||'');found=e;}});
+    AIAuditStore._save(list);
+    return found;
+  },
+  record:function(entry){
+    var e=AIAuditStore.sanitize(entry||{})||{};
+    var ts=(typeof e.timestamp==='number')?e.timestamp:Date.now();
+    e.timestamp=ts;
+    e.auditId='au_'+StoryStore.hash({requestId:e.requestId||'',provider:e.provider||'',model:e.model||'',
+      promptHash:e.promptHash||'',timestamp:ts});
+    var list=AIAuditStore._load();
+    list.push(e);
+    AIAuditStore._save(list);
+    return e;
+  },
+  list:function(options){
+    var opts=options||{};
+    var list=AIAuditStore._load().slice().sort(function(a,b){
+      if(b.timestamp!==a.timestamp)return b.timestamp-a.timestamp;
+      return a.auditId<b.auditId?-1:(a.auditId>b.auditId?1:0);
+    });
+    if(opts.limit>0)list=list.slice(0,opts.limit);
+    return list;
+  },
+  get:function(auditId){return AIAuditStore._load().filter(function(e){return e.auditId===auditId;})[0]||null;},
+  count:function(){return AIAuditStore._load().length;},
+  last:function(){return AIAuditStore.list({limit:1})[0]||null;},
+  clear:function(){try{localStorage.removeItem(AI_AUDIT_KEY);}catch(e){}return true;},
+  assertNoSecret:function(value){
+    var text=String(JSON.stringify(value)).toLowerCase();
+    var bad=[];
+    AIAuditStore.FORBIDDEN.forEach(function(k){if(text.indexOf(k)>=0)bad.push(k);});
+    return{clean:bad.length===0,found:bad};
+  }
+};
+// ===== Phase 6: Provider cancellation / 指数退避 =====
+function createAbortController(){
+  return (typeof AbortController==='function')?new AbortController():null;
+}
+function abortProviderError(){return makeProviderError(ProviderErrors.CANCELLED,'请求已取消（AbortController）');}
+function retryDelayFor(attemptIndex,options){
+  var opts=options||{};
+  var base=(typeof opts.retryDelayMs==='number')?opts.retryDelayMs:500;
+  var factor=(typeof opts.retryFactor==='number')?opts.retryFactor:2;
+  var maxDelay=(typeof opts.maxRetryDelayMs==='number')?opts.maxRetryDelayMs:8000;
+  return Math.min(maxDelay,Math.round(base*Math.pow(factor,Math.max(0,attemptIndex))));
+}
+function waitBeforeRetry(delayMs,options,asyncMode){
+  var opts=options||{};
+  if(typeof opts.sleep==='function')return opts.sleep(delayMs);
+  if(!asyncMode||delayMs<=0||typeof setTimeout!=='function')return null;
+  return new Promise(function(resolve){setTimeout(resolve,delayMs);});
+}
+var ProviderCancellation={
+  active:null,
+  begin:function(options){
+    var opts=options||{};
+    var ctrl=opts.controller||createAbortController();
+    ProviderCancellation.active={controller:ctrl,signal:(opts.signal||(ctrl?ctrl.signal:null)),startedAt:Date.now(),aborted:false};
+    return ProviderCancellation.active;
+  },
+  abort:function(reason){
+    var a=ProviderCancellation.active;
+    if(!a)return false;
+    a.aborted=true;a.reason=String(reason||'user');
+    if(a.controller&&typeof a.controller.abort==='function'){try{a.controller.abort();}catch(e){}}
+    return true;
+  },
+  end:function(){var a=ProviderCancellation.active;ProviderCancellation.active=null;return a;},
+  isAborted:function(){return !!(ProviderCancellation.active&&ProviderCancellation.active.aborted);}
+};
+var LLMStreamState={active:false,buffer:'',chunks:0,task:'',chapterId:'',startedAt:0,finishedAt:0,aborted:false,error:null};
+// ===== Phase 6: 既有实体最小差异更新（只改模型显式断言且与原值不同的字段）=====
+LLMProposalBridge.toEntityUpdates=function(input){
+  input=input||{};
+  var chapterId=String(input.chapterId||'');
+  var extraction=input.extraction||normalizeChapterExtraction({});
+  var verified=input.verified||{};
+  var snap=StoryStore.snapshot();
+  var updates=[],rejected=[];
+  var ALLOWED_FIELDS=['personality','ability','goal'];
+  extraction.characters.forEach(function(c){
+    if(!c.fields)return;
+    var r=StoryEngine.resolveEntity(c.name);
+    if(!r||r.status!=='resolved'||!r.entityRef||r.entityRef.entityType!=='character')return;
+    var id=r.entityRef.entityId;
+    var current=(snap.characters||[]).filter(function(x){return x.id===id;})[0];
+    if(!current)return;
+    var ev=(verified[c.name]||[]);
+    ALLOWED_FIELDS.forEach(function(f){
+      var next=c.fields[f];
+      if(typeof next!=='string'||!next)return;
+      var before=String(((current.fields||{})[f])||'');
+      if(before===next)return;                          // 最小差异：无变化不产生变更
+      if(!ev.length){rejected.push({kind:'character_field',name:c.name,field:f,reason:'缺少可验证 evidence'});return;}
+      updates.push({actionId:'llm:field:'+id+'.'+f,type:'update',
+        target:{entityType:'character',entityId:id,displayName:current.name},
+        path:'characters.'+id+'.fields.'+f,before:before,after:next,
+        reason:'LLM 最小更新：'+f+'（'+current.name+'）',evidence:ev.slice(0,1),confidence:0.6});
+    });
+  });
+  extraction.relationships.forEach(function(rel){
+    var a=StoryEngine.resolveEntity(rel.from),b=StoryEngine.resolveEntity(rel.to);
+    if(!a||!b||a.status!=='resolved'||b.status!=='resolved')return;
+    var existing=(snap.relationships||[]).filter(function(x){
+      return (x.fromId===a.entityRef.entityId&&x.toId===b.entityRef.entityId)||
+             (x.fromId===b.entityRef.entityId&&x.toId===a.entityRef.entityId);
+    })[0];
+    if(!existing)return;
+    var nextType=String(rel.type||'');
+    if(!nextType||nextType===String(existing.type||''))return;
+    updates.push({actionId:'llm:relation:'+existing.id+'.type',type:'update',
+      target:{entityType:'relationship',entityId:existing.id,displayName:existing.id},
+      path:'relationships.'+existing.id+'.type',before:String(existing.type||''),after:nextType,
+      reason:'LLM 最小更新：关系类型',evidence:[],confidence:0.55});
+  });
+  return{updates:updates,rejected:rejected};
+};
+
+AIRuntime.MemoryIndex=MemoryIndex;
+AIRuntime.ChapterSummary=ChapterSummary;
+AIRuntime.ChapterSummarySchema=ChapterSummarySchema;
+AIRuntime.VolumeSummary=VolumeSummary;
+AIRuntime.ContextBudgeter=ContextBudgeter;
+AIRuntime.StoryContextBuilder=StoryContextBuilder;
+AIRuntime.AIAuditStore=AIAuditStore;
+AIRuntime.ProviderCancellation=ProviderCancellation;
+AIRuntime.LLMStreamState=LLMStreamState;
+AIRuntime.retryDelayFor=retryDelayFor;
+AIRuntime.waitBeforeRetry=waitBeforeRetry;
+AIRuntime.createAbortController=createAbortController;
+AIRuntime.normalizeToken=normalizeToken;
+AIRuntime.bigramsOf=bigramsOf;
 
 // ===== UI Layer =====
 var curPage='dashboard';var curChId=null;var curView='list';
@@ -4805,11 +6402,102 @@ function rDataC(el){
 
 function rSettings(el){
   var meta=StoryStore.getMeta();
-  el.innerHTML='<div class="card"><div class="card-title">项目设置</div><div class="form-group"><label class="form-label">小说标题</label><input class="form-input" value="'+(meta.title||'')+'" oninput="StoryStore.setMeta(\'title\',this.value)" /></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" onchange="StoryStore.setMeta(\'genre\',this.value)">'+Object.keys(GENRE_CONFIG).map(function(k){return'<option value="'+k+'"'+(meta.genre===k?' selected':'')+'>'+GENRE_CONFIG[k].name+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">每日目标字数</label><input class="form-input" type="number" value="'+(meta.dailyGoal||4000)+'" onchange="StoryStore.setMeta(\'dailyGoal\',parseInt(this.value))" /></div></div><div class="card"><div class="card-title">外观</div><div class="form-group"><label class="form-label">主题</label><select class="form-select" onchange="setTheme(this.value)"><option value="dark"'+(meta.theme==='dark'?' selected':'')+'>深色</option><option value="light"'+(meta.theme==='light'?' selected':'')+'>浅色</option><option value="warm"'+(meta.theme==='warm'?' selected':'')+'>暖色</option></select></div><div class="form-group"><label class="form-label">字体大小: '+(meta.fontSize||15)+'px</label><input type="range" min="12" max="20" value="'+(meta.fontSize||15)+'" oninput="setFontSize(this.value)" style="width:100%" /></div></div>'+providerSettingsHTML();
+  el.innerHTML='<div class="card"><div class="card-title">项目设置</div><div class="form-group"><label class="form-label">小说标题</label><input class="form-input" value="'+(meta.title||'')+'" oninput="StoryStore.setMeta(\'title\',this.value)" /></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" onchange="StoryStore.setMeta(\'genre\',this.value)">'+Object.keys(GENRE_CONFIG).map(function(k){return'<option value="'+k+'"'+(meta.genre===k?' selected':'')+'>'+GENRE_CONFIG[k].name+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">每日目标字数</label><input class="form-input" type="number" value="'+(meta.dailyGoal||4000)+'" onchange="StoryStore.setMeta(\'dailyGoal\',parseInt(this.value))" /></div></div><div class="card"><div class="card-title">外观</div><div class="form-group"><label class="form-label">主题</label><select class="form-select" onchange="setTheme(this.value)"><option value="dark"'+(meta.theme==='dark'?' selected':'')+'>深色</option><option value="light"'+(meta.theme==='light'?' selected':'')+'>浅色</option><option value="warm"'+(meta.theme==='warm'?' selected':'')+'>暖色</option></select></div><div class="form-group"><label class="form-label">字体大小: '+(meta.fontSize||15)+'px</label><input type="range" min="12" max="20" value="'+(meta.fontSize||15)+'" oninput="setFontSize(this.value)" style="width:100%" /></div></div>'+providerSettingsHTML()+inspectorsHTML();
 }
 
 // ===== Event Handlers =====
 var _lastActionPlans=[];
+
+// ===== Phase 6: 检查器 UI（Context / Memory / AI Audit；不做大型 UI 重构）=====
+function contextInspectorHTML(chapterIdx,task,options){
+  var idx=(typeof chapterIdx==='number')?chapterIdx:Math.max(0,StoryStore.getChapters().length-1);
+  var built=StoryContextBuilder.build(task||StoryContextBuilder.TASKS.COPILOT,idx,options||{});
+  var r=built.report;
+  return '<div class="card"><div class="card-title">Context Inspector</div>'+
+    '<p class="text-sm">当前任务: '+built.task+'</p>'+
+    '<p class="text-sm">预算: '+r.budget+' tokens（预留输出 '+(r.reserveOutputTokens||0)+'）</p>'+
+    '<p class="text-sm">已使用: '+r.usedTokens+' · 估算总量: '+r.totalEstimatedTokens+'</p>'+
+    '<p class="text-sm">被裁剪: '+(r.truncated?('是（'+((r.removed||[]).join(', ')||'部分截断')+'）'):'否')+'</p>'+
+    '<div class="action-desc text-muted">'+r.sections.map(function(s){
+      return s.name+'[P'+s.priority+']'+(s.included?(s.estimatedTokens+'t'):'已丢弃')+(s.truncated&&s.included?'·截断':'');
+    }).join(' · ')+'</div>'+
+    '<div class="action-desc text-muted">promptHash: '+built.promptHash+'</div></div>';
+}
+function memoryInspectorHTML(chapterIdx){
+  var idx=(typeof chapterIdx==='number')?chapterIdx:Math.max(0,StoryStore.getChapters().length-1);
+  var lv=MemoryIndex.levels(idx,{});
+  var st=MemoryIndex.stats();
+  var names={L0:'当前章节',L1:'最近章节',L2:'长期事实',L3:'历史摘要'};
+  return '<div class="card"><div class="card-title">Memory Inspector</div>'+
+    ['L0','L1','L2','L3'].map(function(k){
+      return '<p class="text-sm">'+k+' '+names[k]+': '+lv.stats[k].items+' 项 · 约 '+lv.stats[k].estimatedTokens+' tokens</p>';
+    }).join('')+
+    '<div class="action-desc text-muted">索引: '+st.items+' 项（倒排键 '+st.postings+'）· revision '+st.revision+'</div>'+
+    '<div class="action-desc text-muted">章节摘要: '+Object.keys(ChapterSummary.all()).length+' 条（有效 '+
+      ChapterSummary.list().filter(function(s){return s.valid;}).length+'）· 卷摘要: '+Object.keys(VolumeSummary.all()).length+' 条</div>'+
+    '<div action-desc class="action-desc"><button class="btn btn-sm" onclick="rebuildMemoryIndex()">重建索引</button>'+
+    '<button class="btn btn-sm" onclick="generateSummaries()">生成摘要</button></div></div>';
+}
+function auditInspectorHTML(){
+  var list=AIAuditStore.list({limit:10});
+  var rows=list.map(function(e){
+    return '<div class="action-desc">'+new Date(e.timestamp).toLocaleString()+' · '+(e.provider||'-')+' / '+(e.model||'-')+
+      ' · req '+(e.requestId||'-')+' · '+(e.latencyMs||0)+'ms · '+(e.error?('错误:'+e.error.code):'成功')+
+      (e.changeSetId?(' · ChangeSet '+e.changeSetId):'')+(e.auditId?(' · '+e.auditId):'')+'</div>';
+  }).join('')||'<p class="text-muted text-sm">暂无 AI 调用记录</p>';
+  return '<div class="card"><div class="card-title">AI Audit（共 '+AIAuditStore.count()+' 条）</div>'+rows+
+    '<div class="action-actions"><button class="btn btn-sm" onclick="clearAuditLog()">清除审计</button></div>'+
+    '<p class="text-muted text-sm mt-1">审计为本机 AI 操作历史（独立存储），不含 API Key；完整 prompt 默认不入 StoryState。</p></div>';
+}
+function inspectorsHTML(){
+  return contextInspectorHTML()+memoryInspectorHTML()+auditInspectorHTML();
+}
+function clearAuditLog(){
+  AIAuditStore.clear();
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  toast('AI 审计已清除','info');
+  return true;
+}
+function rebuildMemoryIndex(){
+  MemoryIndex.rebuild();
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  toast('MemoryIndex 已重建','success');
+  return MemoryIndex.stats();
+}
+function generateSummaries(){
+  var chapters=StoryStore.getChapters();
+  var out=[];
+  for(var i=0;i<chapters.length;i++){
+    var s=ChapterSummary.deterministic(chapters[i].id,{});
+    out.push(ChapterSummary.store(s,{source:'deterministic:summary'}));
+  }
+  VolumeSummary.buildAll({store:true});
+  MemoryIndex.rebuild();
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  toast('已生成 '+out.length+' 条章节摘要','success');
+  return out;
+}
+function runStreamingAnalysis(){
+  if(!curChId)return null;
+  var el=function(){return document.getElementById('llmStreamBuffer');};
+  var res=LLMChapterAnalysis.runStream(curChId,{},function(c,state){
+    var node=el();
+    if(node)node.textContent=String(state.buffer).slice(-400);
+  });
+  function done(r){
+    _lastLLMAnalysis=r;_pendingLLMChangeSet=r?r.changeSet:null;
+    var node=el();
+    if(node)node.textContent=(r&&r.streamed?('流式完成：'+((r.streamState||{}).chunks||0)+' chunks，'):'')+((r&&r.summary)?('Provider '+(r.summary.provider||'-')):'');
+    toast(r&&r.source==='llm'?'流式分析完成（需人工审批）':'流式不可用，已降级',r&&r.source==='llm'?'success':'info');
+    return r;
+  }
+  if(isThenable(res))return res.then(done);
+  return done(res);
+}
+
 
 // ===== Phase 5.4: Provider 设置 UI（API Key 只存本机独立配置，不进入 StoryState）=====
 function providerSettingsHTML(){

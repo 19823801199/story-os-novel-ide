@@ -1,5 +1,7 @@
 # Changelog
 
+CHANGELOG
+
 ## v0.2.0 - Phase 5.4 (AI Provider Contract & Safe LLM Integration)
 
 > 本阶段是第一个真实 LLM 可以进入系统的阶段。核心写入架构未改动：模型只能产生结构化建议。

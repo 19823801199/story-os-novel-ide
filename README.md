@@ -1,7 +1,7 @@
 # Story OS Novel IDE
 
 **版本**: v0.2.0
-**阶段**: Phase 5.4 - AI Provider Contract & Safe LLM Integration（基线 Phase 4 / 5.1 / 5.2 / 5.3 全部保留）
+**阶段**: Phase 6 - Context, Memory & Long-Context Runtime（基线 Phase 4 / 5.1 / 5.2 / 5.3 / 5.4 全部保留）
 **定位**: AI 驱动的小说创作与叙事状态管理 IDE
 
 ## 核心架构
@@ -23,9 +23,13 @@ ChangeSet Runtime (Proposed → Validating → Valid → Approved → Applied �
     ↓
 ExecutionLayer → StoryStore.applyChange (唯一写入口)
     ↓
+MemoryIndex (派生索引) → StoryContextBuilder (4 类任务) → ContextBudgeter (确定性裁剪)
+    ↓
 AI Provider (Phase 5.4: Mock / OpenAI-compatible / Ollama)
     ↓
-ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（人工审批）
+ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（人工审批）→ Verify
+    ↓
+AIAuditStore (AI 操作历史，独立存储；与 StoryState 严格分离)
 ```
 
 ## 已完成
@@ -40,7 +44,7 @@ ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（�
 - **幂等执行** - 决策 hash 去重，防止重复执行
 - **一致性检查** - 基于真实 StoryState + 规则系统，无随机模拟
 - **数据持久化** - localStorage 自动保存 + 旧版本数据迁移
-- **Regression Test** - 147 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项 + Phase 5.2 的 35 项 + Phase 5.3 的 35 项全部保留）
+- **Regression Test** - 192 项自动化回归测试 + 6 项真异步套件（Phase 4 / 5.1 / 5.2 / 5.3 / 5.4 的 147 项全部保留）
 - **Copilot 面板** - 章节编辑器右侧实时展示 AI 诊断与可执行动作
 
 ### Phase 5.1 新增
@@ -106,6 +110,8 @@ ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（�
 - **文档** - `docs/phase5.4-provider-contract.md`
 
 
+README
+
 ## 未完成
 
 - 真实 LLM 端到端验证（Provider 契约已实现，但未用真实 API Key 做 smoke test）
@@ -134,7 +140,8 @@ ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（�
 │   ├── phase5-runtime-contract.md   # Phase 5.1 状态契约与可审计变更
 │   ├── phase5.2-chapter-analysis.md # Phase 5.2 章节分析与受控运行时迁移
 │   ├── phase5.3-action-consistency.md # Phase 5.3 运行时 Action 迁移与可解释一致性
-│   └── phase5.4-provider-contract.md  # Phase 5.4 Provider 契约与安全 LLM 接入
+│   ├── phase5.4-provider-contract.md  # Phase 5.4 Provider 契约与安全 LLM 接入
+│   └── phase6-context-memory.md      # Phase 6 上下文、记忆与长上下文运行时
 ├── backup/                 # 原始备份（不提交 Git）
 │   └── phase-4-complete-original/
 ├── README.md
@@ -161,10 +168,11 @@ node tests/regression-tests.js
 | SCHEMA_VERSION | 2 |
 | CONTRACT_VERSION | 5.1 |
 | Rules | 16 |
-| Regression Tests | 147/147 PASS |
+| Regression Tests | 192/192 PASS（另有 6 项真异步套件） |
 | ChapterAnalysis | Phase 5.2（确定性解析为基线，Phase 5.4 起 LLM 为可选增强层） |
 | Consistency | Phase 5.3（确定性评分，Issues 为事实来源） |
 | AI Provider | Phase 5.4（Mock / OpenAI-compatible / Ollama；真实 Provider 未做 smoke test） |
+| Context / Memory | Phase 6（ContextBuilder / ContextBudgeter / MemoryIndex / 摘要 / AI Audit） |
 | 真实 LLM | 未接入（Phase 5.1 / 5.2 均不含 Provider） |
 
 ## License
