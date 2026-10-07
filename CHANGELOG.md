@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.2.0 - Phase 5.3 (Runtime Action Migration & Explainable Consistency)
+
+### Added
+
+- `ActionMigration`：`propose()` / `changesFor()` / `matrix()` / `statusFor()` / `evidenceForForeshadow()`，Action → StateChange → ChangeSet
+- `StoryContract.makeConsistencyIssue()` / `makeActionProposal()` / `validateConsistencyIssue()` / `severityFromPriority()`
+- `ConsistencyScore.compute()`：确定性评分（blocking -15 / error -8 / warning -3 / info -1），Issues 为事实来源
+- `StoryStore.getActionDecisions()` / `appendActionDecision()`：审批与拒绝的持久化审计
+- `AIRuntime.consistencyReport()` / `ruleContracts()` / `ruleValidateCallCount()` / `actionMigrationMatrix()` / `auditTrail()` / `actionDecisions()` / `applyPlan()` / `rejectPlan()` / `evaluateContext()`
+- 角色洞察 / 境界 / 弧光的确定性分析：`analysis.characterInsights` / `analysis.realm` / `analysis.arc`
+- `narrative_state.actionDecisions`（schema 默认值 + normalize 保留）
+- 回归测试由 69 项扩展到 104 项（Phase 4 / 5.1 / 5.2 的测试全部保留）
+
+### Changed
+
+- **Runtime Action 全量迁移**：`introduce_conflict` / `resolve_foreshadow` / `create_protagonist` / `designate_protagonist` / `introduce_sidekick` 产生真实 StateChange 并经 ChangeSet 落库；其余 11 个动作迁移为"诊断类"（只产出 Issue，不再写 `aiSuggestions`）
+- `AIExecutionLayer.execute()` 内部改为 ChangeSet 路径（批准人 `compat:runtime.execute`）；`_applyDecision()` 直写移除
+- `AIRuntime.run()` 不再直写状态，返回 `verified / changeSetIds / stateHashAfter`
+- `ActionPlanSystem`：`observe→analyze→plan→validate→policy→executeWithApproval→verify` 统一；`plan.id` 改为确定性哈希（去掉 `Date.now()`）
+- `ActionPlanSystem.verify()` 重定义：`success / hasChanges / changeCount / changes / executedCount / skippedCount / failedCount / stateHashBefore / stateHashAfter / changeSetIds / verifiedAt`
+- `ActionPlanSystem.plan()` 为每个计划附带 `issueId / evidence / policy / suggestedChangeSetId / diagnosisOnly`
+- `buildAIContext()` 注入 `world`、`characters[].aiProfile/aliases`、`chapter.id`、角色洞察、境界与弧光
+- `AIRuleRegistry`：Rule Contract 标准化（`ruleId/name/description/category/evaluate`），`validate()` 真正参与决策
+- `runConsistencyCheck()` 改用 `AIRuntime.consistencyReport()`；`runCopilot()` 渲染 Issue 的证据/建议/entityRef
+- `approveAction()` 依据真实 verify 结果提示；`rejectAction()` 保留计划并标记 REJECTED
+- 审计账本条目补齐 `ruleId / issueId / actionId / actionType / chapterId / changes[]`
+
+### Fixed
+
+- **Consistency 页面崩溃**：`runConsistencyCheck()` 引用了不存在的裸 `AIDecisionLayer`（ReferenceError），页面无法运行；已修复（测试 70/100）
+- **4 条结构性死亡规则**：`world_rule_conflict`（`world` 未进入上下文）、`character_inconsistency`（`aiProfile` 未注入 + `consistencyScore` 恒为 100）、`arc_stagnation`（叙事状态永远 undefined）、`power_level_conflict`（硬编码 `return false`）
+- **`Rule.validate()` 空转**：条件命中即产出动作，validate 返回值被忽略；现在 validate 可阻断动作并记录 rejected
+- **Verify 假计数**：`executedCount` 曾等于"未被 skip 的动作数"，与实际状态变化无关；现以 `structuredDiff` 为准
+- **UI 假报成功**：`approveAction()` 无条件 `toast('已执行')`，即使 `stateHashBefore === stateHashAfter`；现在只在验证通过时报告成功
+- **`toast()` 健壮性**：在缺少 `Element.remove` 的环境（含测试 DOM mock）中抛错
+
+### Notes
+
+- **当前仍然没有真实 LLM**（无 fetch / XHR / WebSocket / SSE / Provider / API Key）
+- 生产代码中已无 Action 直写 StoryState；剩余 `COMPATIBILITY LEGACY PATH` 仅为解析缓存 `_lastParseResult`
+- 写入唯一入口：`StoryStore.applyChange()`（经 `AIExecutionLayer`）
+- 未改动 `APP_VERSION` / `STORY_STATE_VERSION` / `SCHEMA_VERSION`
+
+
 ## v0.2.0 - Phase 5.2 (Chapter Analysis & Controlled Runtime Migration)
 
 ### Added

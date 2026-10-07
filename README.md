@@ -1,7 +1,7 @@
 # Story OS Novel IDE
 
 **版本**: v0.2.0
-**阶段**: Phase 5.2 - Chapter Analysis & Controlled Runtime Migration（基线 Phase 4 / 5.1 全部保留）
+**阶段**: Phase 5.3 - Runtime Action Migration & Explainable Consistency（基线 Phase 4 / 5.1 / 5.2 全部保留）
 **定位**: AI 驱动的小说创作与叙事状态管理 IDE
 
 ## 核心架构
@@ -17,9 +17,11 @@ StoryEngine (内容解析引擎；解析与写入已分离)
     ↓
 ChapterAnalysis (analyzeChapter / Evidence / Entity Resolution / diffAnalysis)
     ↓
+AIRuntime (RuleRegistry 诊断 → ActionMigration → ActionProposal)
+    ↓
 ChangeSet Runtime (Proposed → Validating → Valid → Approved → Applied → Verified)
     ↓
-AIRuntime (规则决策引擎)
+ExecutionLayer → StoryStore.applyChange (唯一写入口)
     ↓
 AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 ```
@@ -36,7 +38,7 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **幂等执行** - 决策 hash 去重，防止重复执行
 - **一致性检查** - 基于真实 StoryState + 规则系统，无随机模拟
 - **数据持久化** - localStorage 自动保存 + 旧版本数据迁移
-- **Regression Test** - 69 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项全部保留）
+- **Regression Test** - 104 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项 + Phase 5.2 的 35 项全部保留）
 - **Copilot 面板** - 章节编辑器右侧实时展示 AI 诊断与可执行动作
 
 ### Phase 5.1 新增
@@ -66,6 +68,24 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **Controlled Runtime** - `syncFromChapter()` 改造为兼容适配器，经 analyze → propose → validate → approve → apply → verify
 - **文档** - `docs/phase5.2-chapter-analysis.md`
 
+### Phase 5.3 新增
+
+- **Runtime Action 全量迁移** - 16 个 Action 无一例外：5 个真实状态变更（`introduce_conflict` / `resolve_foreshadow` / `create_protagonist` / `designate_protagonist` / `introduce_sidekick`）+ 11 个诊断类，全部经 `ActionProposal → StateChange → ChangeSet`
+- **ActionMigration** - `ActionMigration.propose()`：Action → StateChange → ChangeSet(PROPOSED)，含语义幂等保护
+- **唯一写入口** - `AIExecutionLayer._applyDecision()` 直写已移除（返回 `deprecated_no_write`）；写入一律经 `ChangeSetRuntime.apply → AIExecutionLayer.applyChangeSet → StoryStore.applyChange`
+- **Approval 硬门** - `approveAction()` 走 `applyPlan()`；`rejectAction()` 写入 `narrative_state.actionDecisions`（REJECTED 可审计，不再只是从内存数组删除）
+- **Verify 重定义** - `changeCount / changes / executedCount / success / stateHashBefore / stateHashAfter / verifiedAt`；`executedCount` 只统计真正产生可观测变化的动作
+- **Consistency 页面修复** - `runConsistencyCheck()` 不再引用不存在的裸 `AIDecisionLayer`，改为 `AIRuntime.consistencyReport()`
+- **ConsistencyIssue 契约** - 13 字段（issueId / ruleId / severity / category / title / message / entityRef / evidence / location / facts / suggestedFix / suggestedChangeSet / createdAt）
+- **Rule Contract** - `ruleId / name / description / priority / category / evaluate()`；规则只做 Observe/Diagnose，永不写状态
+- **Rule.validate 真正生效** - `condition → validate → issue/action proposal`，并暴露 `ruleValidateCallCount()`
+- **4 条结构性死亡规则修复** - `world_rule_conflict`（注入 world）、`character_inconsistency`（注入 aiProfile + 确定性角色洞察）、`arc_stagnation`（可评估叙事状态）、`power_level_conflict`（确定性境界阶梯）
+- **确定性一致性评分** - `ConsistencyScore.compute(issues)`（blocking -15 / error -8 / warning -3 / info -1），取消硬编码 100
+- **审计链** - `ruleId → issueId → actionId → changeSetId → stateChanges → execution → verify`（`AIRuntime.auditTrail()`）
+- **UI 真实反馈** - "已执行"只在验证通过时出现，否则显示"状态未变化 / 执行失败 / 验证失败"（`applyResultMessage()`）
+- **文档** - `docs/phase5.3-action-consistency.md`
+
+
 ## 未完成
 
 - 真实 LLM Provider（DeepSeek / OpenAI-compatible / 本地模型）
@@ -92,7 +112,8 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 │   └── regression-tests.js # 回归测试
 ├── docs/                    # 文档目录
 │   ├── phase5-runtime-contract.md   # Phase 5.1 状态契约与可审计变更
-│   └── phase5.2-chapter-analysis.md # Phase 5.2 章节分析与受控运行时迁移
+│   ├── phase5.2-chapter-analysis.md # Phase 5.2 章节分析与受控运行时迁移
+│   └── phase5.3-action-consistency.md # Phase 5.3 运行时 Action 迁移与可解释一致性
 ├── backup/                 # 原始备份（不提交 Git）
 │   └── phase-4-complete-original/
 ├── README.md
@@ -119,8 +140,9 @@ node tests/regression-tests.js
 | SCHEMA_VERSION | 2 |
 | CONTRACT_VERSION | 5.1 |
 | Rules | 16 |
-| Regression Tests | 69/69 PASS |
+| Regression Tests | 104/104 PASS |
 | ChapterAnalysis | Phase 5.2（确定性解析，无 LLM） |
+| Consistency | Phase 5.3（确定性评分，Issues 为事实来源） |
 | 真实 LLM | 未接入（Phase 5.1 / 5.2 均不含 Provider） |
 
 ## License

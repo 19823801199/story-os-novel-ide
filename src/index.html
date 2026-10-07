@@ -168,7 +168,7 @@ var StoryStore=(function(){
       meta:{title:'未命名小说',genre:'fantasy',dailyGoal:4000,createdAt:0,theme:'dark',fontSize:15,autoSave:true},
       chapters:[],characters:[],relationships:[],world:{setting:{},locations:[],factions:[],rules:[]},
       timeline:[],foreshadowing:[],conflicts:[],
-      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[]},
+      narrative_state:{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[],actionDecisions:[]},
       _lastParseResult:null
     };
   }
@@ -354,7 +354,8 @@ var StoryStore=(function(){
       currentArc:asString(ns.currentArc,''),paceScore:asNumber(ns.paceScore,0),tensionLevel:asNumber(ns.tensionLevel,0),
       activeConflicts:asArray(ns.activeConflicts),pendingForeshadows:asArray(ns.pendingForeshadows),
       characterPresence:asObject(ns.characterPresence),lastAnalysis:asNumber(ns.lastAnalysis,0),
-      aiSuggestions:asObject(ns.aiSuggestions),issues:asArray(ns.issues),changeLedger:asArray(ns.changeLedger)
+      aiSuggestions:asObject(ns.aiSuggestions),issues:asArray(ns.issues),changeLedger:asArray(ns.changeLedger),
+      actionDecisions:asArray(ns.actionDecisions)
     };
 
     // contracts must be pure data: strip executable values
@@ -723,6 +724,9 @@ var StoryStore=(function(){
     getChangeLedger:function(){return _state.narrative_state.changeLedger||[];},
     appendChangeLedger:function(entry){if(!_state.narrative_state.changeLedger)_state.narrative_state.changeLedger=[];_state.narrative_state.changeLedger.push(deepClone(entry));persist();return entry;},
     clearChangeLedger:function(){_state.narrative_state.changeLedger=[];persist();},
+    // Phase 5.3: 审批/拒绝审计（记录在唯一事实来源内部）
+    getActionDecisions:function(){return (_state.narrative_state.actionDecisions||[]).slice();},
+    appendActionDecision:function(entry){if(!_state.narrative_state.actionDecisions)_state.narrative_state.actionDecisions=[];_state.narrative_state.actionDecisions.push(deepClone(entry));persist();return entry;},
     // Parse cache (controlled write path; replaces direct StoryStore.state writes)
     setLastParseResult:function(result){_state._lastParseResult=deepClone(result);persist();return _state._lastParseResult;},
     // Persistence
@@ -1282,91 +1286,423 @@ var StoryEngine={
 
 };
 
+// ===== Phase 5.3: deterministic realm ladder (power level judgement) =====
+var REALM_LADDER=['炼气','筑基','金丹','元婴','化神','炼虚','合体','大乘','渡劫','仙人'];
+function realmIndexOf(text){
+  var s=String(text==null?'':text);
+  for(var i=REALM_LADDER.length-1;i>=0;i--){if(s.indexOf(REALM_LADDER[i])>=0)return i;}
+  return -1;
+}
+function expectedRealmCeiling(chapterCount){
+  // 确定性映射：每 10 章允许提升一个大境界
+  return Math.min(REALM_LADDER.length-1,Math.floor((chapterCount||0)/10));
+}
+
+// ===== Phase 5.3: rule metadata (Rule Contract 的 name / description / category) =====
+var RULE_META={
+  no_characters:{name:'缺少角色',description:'小说中没有任何角色',category:'character'},
+  no_protagonist:{name:'缺少主角',description:'没有任何 charType=protagonist 的角色',category:'character'},
+  no_conflict:{name:'缺少冲突',description:'已有 3 章以上但没有任何冲突',category:'plot'},
+  protag_missing:{name:'主角缺席',description:'主角在当前章节中未出现',category:'plot'},
+  foreshadow_overdue:{name:'伏笔逾期',description:'伏笔超过了预期回收章节',category:'foreshadowing'},
+  slow_pace:{name:'节奏过慢',description:'章节平均字数明显偏低',category:'pacing'},
+  lonely_protagonist:{name:'缺少配角',description:'只有主角，没有配角',category:'character'},
+  character_inconsistency:{name:'角色一致性',description:'角色一致性评分过低（确定性评分，非硬编码）',category:'consistency'},
+  relationship_inconsistency:{name:'关系一致性',description:'角色关系引用了不存在的角色',category:'consistency'},
+  timeline_conflict:{name:'时间线一致性',description:'时间线存在逆序',category:'timeline'},
+  world_rule_conflict:{name:'世界观规则',description:'世界观规则重复或作用域失效',category:'world'},
+  power_level_conflict:{name:'能力越界',description:'能力/境界超出当前章节进度允许的上限',category:'consistency'},
+  unused_character:{name:'闲置角色',description:'角色从未在任何章节出现',category:'character'},
+  arc_stagnation:{name:'弧光停滞',description:'主角缺少成长弧光标记（确定性判定）',category:'consistency'},
+  chapter_hook_weak:{name:'章节钩子弱',description:'章末缺少悬念钩子',category:'pacing'},
+  ending_hook_missing:{name:'结尾钩子缺失',description:'最近章节结尾缺少悬念',category:'pacing'}
+};
+
+// ===== Phase 5.3: deterministic consistency score (Issues 是事实来源，score 只是派生) =====
+var ConsistencyScore={
+  WEIGHTS:{blocking:15,error:8,warning:3,info:1},
+  compute:function(issues){
+    var list=Array.isArray(issues)?issues:[];
+    var counts={blocking:0,error:0,warning:0,info:0};
+    list.forEach(function(i){
+      var sev=(i&&i.severity)||'info';
+      if(counts[sev]===undefined)counts.info++;else counts[sev]++;
+    });
+    var penalty=0;
+    Object.keys(counts).forEach(function(k){penalty+=counts[k]*(ConsistencyScore.WEIGHTS[k]||0);});
+    return{
+      score:Math.max(0,Math.min(100,100-penalty)),
+      totalIssues:list.length,
+      blockingIssues:counts.blocking,
+      errors:counts.error,
+      warnings:counts.warning,
+      infos:counts.info,
+      penalty:penalty,
+      weights:ConsistencyScore.WEIGHTS
+    };
+  }
+};
+
 // ===== buildAIContext =====
 function buildAIContext(chapterIdx){
   var s=StoryStore.state;
   var ch=s.chapters[chapterIdx]||{};
+  var chapterCount=s.chapters.length;
   var prevChapters=s.chapters.slice(0,chapterIdx).map(function(c,i){return{index:i,title:c.title,summary:(c.summary||'').slice(0,80),wordCount:c.wordCount||0,characters:c.aiAnalysis?c.aiAnalysis.characters:[]};});
   var protagonist=s.characters.find(function(c){return c.charType==='protagonist';});
+  // Phase 5.3: 确定性角色洞察（只读，不写状态）—— 取代硬编码 consistencyScore
+  var characterInsights=s.characters.map(function(c){
+    var rels=(c.relations||[]).filter(function(r){return r&&r.targetId&&!s.characters.some(function(x){return x.id===r.targetId;});});
+    var appearCount=(c.presence&&c.presence.appearCount)||0;
+    var penalties=0,reasons=[];
+    if(chapterCount>=2&&appearCount===0){penalties+=40;reasons.push('从未出场');}
+    if(rels.length){penalties+=15*rels.length;reasons.push('关系引用不存在（'+rels.length+'）');}
+    var dupNames=s.characters.filter(function(x){return x.name===c.name;}).length;
+    if(dupNames>1){penalties+=20;reasons.push('角色名重复（'+dupNames+'）');}
+    var score=Math.max(0,100-penalties);
+    return{id:c.id,name:c.name,charType:c.charType,appearCount:appearCount,
+      firstAppear:(c.presence&&c.presence.firstAppear)||0,lastAppear:(c.presence&&c.presence.lastAppear)||0,
+      danglingRelations:rels.length,duplicateNames:dupNames,score:score,reasons:reasons,
+      aiProfile:c.aiProfile||{},fields:c.fields||{}};
+  });
+  var realm={
+    ladder:REALM_LADDER,
+    chapterCount:chapterCount,
+    ceiling:expectedRealmCeiling(chapterCount),
+    protagonist:protagonist?{id:protagonist.id,name:protagonist.name,
+      ability:(protagonist.fields&&protagonist.fields.ability)||'',
+      index:realmIndexOf((protagonist.fields&&protagonist.fields.ability)||'')}:null,
+    ranked:s.characters.map(function(c){
+      return{id:c.id,name:c.name,charType:c.charType,ability:(c.fields&&c.fields.ability)||'',
+        index:realmIndexOf((c.fields&&c.fields.ability)||'')};
+    }).sort(function(a,b){return b.index-a.index;})
+  };
+  var arc={
+    chapterCount:chapterCount,
+    currentArc:(s.narrative_state&&s.narrative_state.currentArc)||'',
+    protagonist:protagonist?{id:protagonist.id,name:protagonist.name,
+      arcStage:(protagonist.aiProfile&&protagonist.aiProfile.arcStage)||'',
+      hasArcFields:!!((protagonist.aiProfile&&protagonist.aiProfile.arcStage)||
+        (protagonist.fields&&(protagonist.fields.goal||protagonist.fields.weakness||protagonist.fields.personality))),
+      appearCount:(protagonist.presence&&protagonist.presence.appearCount)||0}:null
+  };
   return{
     storyState:{
-      meta:{title:s.meta.title,genre:s.meta.genre,chapterCount:s.chapters.length,characterCount:s.characters.length,foreshadowCount:s.foreshadowing.length,conflictCount:s.conflicts.length},
+      meta:{title:s.meta.title,genre:s.meta.genre,chapterCount:chapterCount,characterCount:s.characters.length,foreshadowCount:s.foreshadowing.length,conflictCount:s.conflicts.length},
       narrative_state:s.narrative_state,
-      characters:s.characters.map(function(c){return{name:c.name,charType:c.charType,tags:c.tags,presence:c.presence,relations:c.relations,fields:c.fields};}),
+      world:{setting:(s.world&&s.world.setting)||{},locations:(s.world&&s.world.locations)||[],factions:(s.world&&s.world.factions)||[],rules:(s.world&&s.world.rules)||[]},
+      characters:s.characters.map(function(c){return{id:c.id,name:c.name,charType:c.charType,tags:c.tags,aliases:c.aliases||[],presence:c.presence,relations:c.relations,fields:c.fields,aiProfile:c.aiProfile};}),
       foreshadowing:s.foreshadowing.filter(function(f){return f.status==='pending';}).map(function(f){return{id:f.id,content:f.content,chapterPlaced:f.chapterPlaced,chapterExpected:f.chapterExpected,status:f.status};}),
       conflicts:s.conflicts.map(function(c){return{id:c.id,description:c.description,status:c.status,parties:c.parties};}),
       timeline:s.timeline.slice(-5),
       chapters:s.chapters
     },
-    chapter:{index:chapterIdx,title:ch.title||'',contentPreview:(ch.content||'').slice(-500),wordCount:ch.wordCount||0,status:ch.status||'未写',parsedCharacters:ch.aiAnalysis?ch.aiAnalysis.characters:[]},
-    analysis:{protagonist:protagonist?protagonist.name:'',antagonists:s.characters.filter(function(c){return c.tags&&c.tags.some(function(t){return['反派','敌人','宿敌'].includes(t);})||c.relations&&c.relations.some(function(r){return r.type==='仇敌';});}).map(function(c){return c.name;}),recentEvents:s.timeline.slice(-3).map(function(t){return t.event;}),paceScore:s.narrative_state.paceScore,tensionLevel:s.narrative_state.tensionLevel,issues:s.narrative_state.issues},
+    chapter:{id:ch.id||'',index:chapterIdx,title:ch.title||'',contentPreview:(ch.content||'').slice(-500),content:ch.content||'',wordCount:ch.wordCount||0,status:ch.status||'未写',parsedCharacters:ch.aiAnalysis?ch.aiAnalysis.characters:[]},
+    analysis:{protagonist:protagonist?protagonist.name:'',antagonists:s.characters.filter(function(c){return c.tags&&c.tags.some(function(t){return['反派','敌人','宿敌'].includes(t);})||c.relations&&c.relations.some(function(r){return r.type==='仇敌';});}).map(function(c){return c.name;}),recentEvents:s.timeline.slice(-3).map(function(t){return t.event;}),paceScore:s.narrative_state.paceScore,tensionLevel:s.narrative_state.tensionLevel,issues:s.narrative_state.issues,characterInsights:characterInsights,realm:realm,arc:arc},
     context:{prevChapters:prevChapters,genreConfig:GENRE_CONFIG[s.meta.genre]||GENRE_CONFIG.other}
   };
 }
-
 // ===== AIRuntime (3-Layer Architecture + 16 Rules + Action Plan) =====
 var AIRuntime=(function(){
   // --- Rule Layer ---
+  // --- Rule Layer (Phase 5.3: Observe / Diagnose only — 规则永不修改 StoryState) ---
   var AIRuleRegistry={
+    validateCallCount:0,
     rules:[
-      // Original 7 rules
-      {id:'no_characters',priority:10,enabled:true,condition:function(ctx){return ctx.storyState.characters.length===0;},action:function(){return{action:'create_protagonist',priority:10,reason:'小说中没有角色，建议创建主角'};},validate:function(){return true;}},
-      {id:'no_protagonist',priority:9,enabled:true,condition:function(ctx){return ctx.storyState.characters.length>0&&!ctx.storyState.characters.some(function(c){return c.charType==='protagonist';});},action:function(){return{action:'designate_protagonist',priority:9,reason:'缺少主角，建议指定一个角色为主角'};},validate:function(){return true;}},
-      {id:'no_conflict',priority:8,enabled:true,condition:function(ctx){return ctx.storyState.chapters.length>=3&&ctx.storyState.conflicts.length===0;},action:function(ctx){return{action:'introduce_conflict',priority:8,reason:'已有'+ctx.storyState.chapters.length+'章但无冲突，建议引入核心冲突'};},validate:function(){return true;}},
-      {id:'protag_missing',priority:9,enabled:true,condition:function(ctx){var ch=ctx.chapter;if(ch.index===0)return false;var parsed=ch.parsedCharacters||[];var protag=ctx.analysis.protagonist;if(!protag)return false;return parsed.indexOf(protag)<0;},action:function(ctx){return{action:'bring_protagonist_back',priority:7,reason:'主角'+ctx.analysis.protagonist+'在当前章节中未出现'};},validate:function(){return true;}},
-      {id:'foreshadow_overdue',priority:7,enabled:true,condition:function(ctx){var currentCh=ctx.chapter.index;return ctx.storyState.foreshadowing.some(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;});},action:function(ctx){var currentCh=ctx.chapter.index;var overdue=ctx.storyState.foreshadowing.filter(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;});return overdue.map(function(f){return{action:'resolve_foreshadow',priority:7,reason:'伏笔「'+f.content+'」已逾期（预期第'+f.chapterExpected+'章，当前第'+currentCh+'章）',target:f.id};});},validate:function(){return true;}},
-      {id:'slow_pace',priority:4,enabled:true,condition:function(ctx){if(ctx.storyState.chapters.length<3)return false;var genre=ctx.storyState.meta.genre;var config=ctx.context.genreConfig;var expected=genre==='xianxia'||genre==='fantasy'?500:genre==='scifi'?600:400;var avg=ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length;return avg<expected*0.6;},action:function(){return{action:'increase_pace',priority:4,reason:'章节平均字数偏低，节奏可能过慢'};},validate:function(){return true;}},
-      {id:'lonely_protagonist',priority:4,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;var supporting=chars.filter(function(c){return c.charType==='supporting'||c.charType==='secondary';});return supporting.length===0;},action:function(){return{action:'introduce_sidekick',priority:4,reason:'缺少配角，主角过于孤独'};},validate:function(){return true;}},
-      // New 9 rules
-      {id:'character_inconsistency',priority:5,enabled:true,condition:function(ctx){if(ctx.storyState.chapters.length<2)return false;var chars=ctx.storyState.characters;for(var i=0;i<chars.length;i++){if(chars[i].aiProfile&&chars[i].aiProfile.consistencyScore<60)return true;}return false;},action:function(ctx){var chars=ctx.storyState.characters;for(var i=0;i<chars.length;i++){if(chars[i].aiProfile&&chars[i].aiProfile.consistencyScore<60)return{action:'flag_inconsistency',priority:5,reason:'角色'+chars[i].name+'一致性评分过低（'+chars[i].aiProfile.consistencyScore+'）',target:chars[i].id};}return null;},validate:function(){return true;}},
-      {id:'relationship_inconsistency',priority:5,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;for(var i=0;i<chars.length;i++){var rels=chars[i].relations||[];for(var j=0;j<rels.length;j++){var target=chars.find(function(c){return c.id===rels[j].targetId;});if(!target)return true;}}return false;},action:function(){return{action:'flag_relationship_issue',priority:5,reason:'角色关系引用了不存在的人物'};},validate:function(){return true;}},
-      {id:'timeline_conflict',priority:6,enabled:true,condition:function(ctx){var tl=ctx.storyState.timeline;if(tl.length<2)return false;for(var i=1;i<tl.length;i++){if(tl[i].date&&tl[i-1].date&&tl[i].date<tl[i-1].date)return true;}return false;},action:function(){return{action:'flag_timeline_conflict',priority:6,reason:'时间线存在逆序，需检查事件先后关系'};},validate:function(){return true;}},
-      {id:'world_rule_conflict',priority:6,enabled:true,condition:function(ctx){var rules=ctx.storyState.world?ctx.storyState.world.rules:[];if(!rules||rules.length===0)return false;return false;},action:function(){return{action:'flag_world_conflict',priority:6,reason:'世界观规则可能存在冲突'};},validate:function(){return true;}},
-      {id:'power_level_conflict',priority:5,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length===0)return false;var protag=chars.find(function(c){return c.charType==='protagonist';});if(!protag)return false;var fields=protag.fields||{};var ability=fields.ability||'';if(!ability)return false;return false;},action:function(){return{action:'flag_power_conflict',priority:5,reason:'人物能力可能超出当前境界'};},validate:function(){return true;}},
-      {id:'unused_character',priority:3,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;var chIdx=ctx.chapter.index;return chars.some(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});},action:function(ctx){var unused=ctx.storyState.characters.filter(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});if(unused.length>0)return{action:'flag_unused_character',priority:3,reason:'角色'+unused[0].name+'尚未在任何章节中出现',target:unused[0].id};return null;},validate:function(){return true;}},
-      {id:'arc_stagnation',priority:4,enabled:true,condition:function(ctx){var chars=ctx.storyState.characters;var protag=chars.find(function(c){return c.charType==='protagonist';});if(!protag||!protag.aiProfile)return false;return protag.aiProfile.arcStage===''&&ctx.storyState.chapters.length>=5;},action:function(){return{action:'flag_arc_stagnation',priority:4,reason:'主角成长弧光停滞，缺少阶段变化'};},validate:function(){return true;}},
-      {id:'chapter_hook_weak',priority:3,enabled:true,condition:function(ctx){var ch=ctx.chapter;if(!ch||ch.index===0)return false;var content=ch.contentPreview||'';var hasHook=['？','?','！','!','突然','忽然','没想到','不料'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&ch.wordCount>200;},action:function(){return{action:'flag_weak_hook',priority:3,reason:'当前章节末尾缺少悬念钩子'};},validate:function(){return true;}},
-      {id:'ending_hook_missing',priority:3,enabled:true,condition:function(ctx){var chapters=ctx.storyState.chapters;if(chapters.length<3)return false;var last=chapters[chapters.length-1];var content=(last.content||'').slice(-200);var hasHook=['？','?','！','!','突然','忽然','没想到','不料','究竟','到底'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&last.wordCount>200;},action:function(){return{action:'flag_ending_hook',priority:3,reason:'最近章节结尾缺少悬念，读者可能失去追读动力'};},validate:function(){return true;}}
+      {id:'no_characters',priority:10,enabled:true,
+        condition:function(ctx){return ctx.storyState.characters.length===0;},
+        action:function(){return{action:'create_protagonist',priority:10,reason:'小说中没有角色，建议创建主角',facts:{characterCount:0},confidence:0.9};},
+        validate:function(){return true;}},
+      {id:'no_protagonist',priority:9,enabled:true,
+        condition:function(ctx){return ctx.storyState.characters.length>0&&!ctx.storyState.characters.some(function(c){return c.charType==='protagonist';});},
+        action:function(ctx){
+          var target=ctx.storyState.characters[0];
+          return{action:'designate_protagonist',priority:9,reason:'缺少主角，建议指定「'+(target?target.name:'')+'」为主角',target:target?target.id:null,facts:{characterCount:ctx.storyState.characters.length},confidence:0.85};
+        },
+        validate:function(ctx,dec){
+          if(!dec||!dec.target)return{valid:false,errors:['target required']};
+          return !!(ctx.storyState.characters||[]).some(function(c){return c.id===dec.target;})?true:{valid:false,errors:['character not found: '+dec.target]};
+        }},
+      {id:'no_conflict',priority:8,enabled:true,
+        condition:function(ctx){return ctx.storyState.chapters.length>=3&&ctx.storyState.conflicts.length===0;},
+        action:function(ctx){return{action:'introduce_conflict',priority:8,reason:'已有'+ctx.storyState.chapters.length+'章但无冲突，建议引入核心冲突',facts:{chapterCount:ctx.storyState.chapters.length,conflictCount:0}};},
+        validate:function(ctx,dec){return !!(dec&&dec.reason);}},
+      {id:'protag_missing',priority:9,enabled:true,
+        condition:function(ctx){var ch=ctx.chapter;if(ch.index===0)return false;var parsed=ch.parsedCharacters||[];var protag=ctx.analysis.protagonist;if(!protag)return false;return parsed.indexOf(protag)<0;},
+        action:function(ctx){return{action:'bring_protagonist_back',priority:7,reason:'主角「'+ctx.analysis.protagonist+'」在当前章节中未出现',facts:{chapterIndex:ctx.chapter.index,protagonist:ctx.analysis.protagonist}};},
+        validate:function(){return true;}},
+      {id:'foreshadow_overdue',priority:7,enabled:true,
+        condition:function(ctx){var currentCh=ctx.chapter.index;return ctx.storyState.foreshadowing.some(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;});},
+        action:function(ctx){
+          var currentCh=ctx.chapter.index;
+          return ctx.storyState.foreshadowing.filter(function(f){return f.chapterExpected>0&&f.chapterExpected<=currentCh;}).map(function(f){
+            return{action:'resolve_foreshadow',priority:7,reason:'伏笔「'+f.content+'」已逾期（预期第'+f.chapterExpected+'章，当前第'+currentCh+'章）',target:f.id,facts:{foreshadowId:f.id,content:f.content,chapterExpected:f.chapterExpected,chapterIndex:currentCh},confidence:0.9};
+          });
+        },
+        // Phase 5.3: validate 真正生效 —— 必须引用真实伏笔
+        validate:function(ctx,dec){
+          if(!dec||!dec.target)return{valid:false,errors:['target required']};
+          var found=(ctx.storyState.foreshadowing||[]).some(function(f){return f.id===dec.target;});
+          return found?true:{valid:false,errors:['foreshadow not found: '+dec.target]};
+        }},
+      {id:'slow_pace',priority:4,enabled:true,
+        condition:function(ctx){if(ctx.storyState.chapters.length<3)return false;var genre=ctx.storyState.meta.genre;var expected=genre==='xianxia'||genre==='fantasy'?500:genre==='scifi'?600:400;var avg=ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length;return avg<expected*0.6;},
+        action:function(ctx){
+          var expected=ctx.storyState.meta.genre==='scifi'?600:500;
+          var avg=ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/Math.max(1,ctx.storyState.chapters.length);
+          return{action:'increase_pace',priority:4,reason:'章节平均字数偏低，节奏可能过慢',facts:{avgWords:Math.round(avg),expected:expected}};
+        },
+        validate:function(){return true;}},
+      {id:'lonely_protagonist',priority:4,enabled:true,
+        condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;var supporting=chars.filter(function(c){return c.charType==='supporting'||c.charType==='secondary';});return supporting.length===0;},
+        action:function(ctx){return{action:'introduce_sidekick',priority:4,reason:'缺少配角，主角过于孤独',facts:{characterCount:ctx.storyState.characters.length},confidence:0.6};},
+        validate:function(){return true;}},
+      {id:'character_inconsistency',priority:5,enabled:true,
+        condition:function(ctx){
+          if(ctx.storyState.chapters.length<2)return false;
+          var insights=(ctx.analysis&&ctx.analysis.characterInsights)||[];
+          return insights.some(function(i){return i.score<60;});
+        },
+        action:function(ctx){
+          var insights=(ctx.analysis&&ctx.analysis.characterInsights)||[];
+          return insights.filter(function(i){return i.score<60;}).map(function(i){
+            return{action:'flag_inconsistency',priority:5,
+              reason:'角色「'+i.name+'」一致性评分过低（'+i.score+'：'+i.reasons.join('、')+'）',
+              target:i.id,facts:{score:i.score,reasons:i.reasons,appearCount:i.appearCount,danglingRelations:i.danglingRelations},confidence:0.7};
+          });
+        },
+        validate:function(ctx,dec){return !!(dec&&dec.target);}},
+      {id:'relationship_inconsistency',priority:5,enabled:true,
+        condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;for(var i=0;i<chars.length;i++){var rels=chars[i].relations||[];for(var j=0;j<rels.length;j++){var target=chars.find(function(c){return c.id===rels[j].targetId;});if(!target)return true;}}return false;},
+        action:function(ctx){
+          var chars=ctx.storyState.characters,out=[];
+          chars.forEach(function(c){
+            var bad=(c.relations||[]).filter(function(r){return r&&r.targetId&&!chars.some(function(x){return x.id===r.targetId;});});
+            if(bad.length)out.push({action:'flag_relationship_issue',priority:5,reason:'角色「'+c.name+'」的关系引用了不存在的角色（'+bad.length+' 处）',target:c.id,facts:{danglingRelations:bad.length,targets:bad.map(function(r){return r.targetId;})},confidence:0.8});
+          });
+          return out;
+        },
+        validate:function(){return true;}},
+      {id:'timeline_conflict',priority:6,enabled:true,
+        condition:function(ctx){var tl=ctx.storyState.timeline;if(tl.length<2)return false;for(var i=1;i<tl.length;i++){if(tl[i].date&&tl[i-1].date&&tl[i].date<tl[i-1].date)return true;}return false;},
+        action:function(ctx){
+          var tl=ctx.storyState.timeline,pairs=[];
+          for(var i=1;i<tl.length;i++){if(tl[i].date&&tl[i-1].date&&tl[i].date<tl[i-1].date)pairs.push({before:tl[i-1].date,after:tl[i].date});}
+          return{action:'flag_timeline_conflict',priority:6,reason:'时间线存在逆序（'+pairs.length+' 处）',facts:{pairs:pairs},confidence:0.8};
+        },
+        validate:function(){return true;}},
+      {id:'world_rule_conflict',priority:6,enabled:true,
+        condition:function(ctx){
+          var world=ctx.storyState.world||{};
+          var rules=world.rules||[];
+          if(rules.length===0)return false;
+          var seen={};
+          for(var i=0;i<rules.length;i++){
+            var r=rules[i]||{};
+            var key=String(r.id||r.text||'');
+            if(key&&seen[key])return true;
+            if(key)seen[key]=true;
+            var scope=r.locationId||r.scope;
+            if(scope&&!(world.locations||[]).some(function(l){return l.id===scope||l.name===scope;}))return true;
+          }
+          return false;
+        },
+        action:function(ctx){
+          var world=ctx.storyState.world||{},rules=world.rules||[],locs=world.locations||[];
+          var seen={},dups=[],missing=[];
+          rules.forEach(function(r){
+            r=r||{};
+            var key=String(r.id||r.text||'');
+            if(key&&seen[key])dups.push(key);else if(key)seen[key]=true;
+            var scope=r.locationId||r.scope;
+            if(scope&&!locs.some(function(l){return l.id===scope||l.name===scope;}))missing.push(scope);
+          });
+          return{action:'flag_world_conflict',priority:6,
+            reason:'世界观规则存在重复（'+dups.length+'）或作用域失效（'+missing.length+'）',
+            facts:{duplicateRules:dups,missingScopes:missing,ruleCount:rules.length},confidence:0.8};
+        },
+        validate:function(){return true;}},
+      {id:'power_level_conflict',priority:5,enabled:true,
+        condition:function(ctx){
+          var realm=ctx.analysis&&ctx.analysis.realm;
+          if(!realm)return false;
+          var p=realm.protagonist;
+          if(p&&p.index>=0&&p.index>realm.ceiling)return true;
+          if(p&&p.index>=0&&realm.ranked.some(function(c){return c.id!==p.id&&c.index>p.index+2;}))return true;
+          return false;
+        },
+        action:function(ctx){
+          var realm=ctx.analysis.realm,p=realm.protagonist,out=[];
+          if(p&&p.index>=0&&p.index>realm.ceiling){
+            out.push({action:'flag_power_conflict',priority:5,
+              reason:'主角「'+p.name+'」能力「'+p.ability+'」（'+REALM_LADDER[p.index]+'）超出 '+realm.chapterCount+' 章允许的上限「'+REALM_LADDER[realm.ceiling]+'」',
+              target:p.id,facts:{ability:p.ability,index:p.index,ceiling:realm.ceiling,chapterCount:realm.chapterCount},confidence:0.75});
+          }
+          if(p&&p.index>=0){
+            realm.ranked.filter(function(c){return c.id!==p.id&&c.index>p.index+2;}).forEach(function(c){
+              out.push({action:'flag_power_conflict',priority:5,
+                reason:'角色「'+c.name+'」能力「'+c.ability+'」高出主角 2 个境界以上',
+                target:c.id,facts:{character:c.name,index:c.index,protagonistIndex:p.index},confidence:0.7});
+            });
+          }
+          return out;
+        },
+        validate:function(ctx,dec){return !!(dec&&dec.target);}},
+      {id:'unused_character',priority:3,enabled:true,
+        condition:function(ctx){var chars=ctx.storyState.characters;if(chars.length<2)return false;return chars.some(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});},
+        action:function(ctx){
+          var unused=ctx.storyState.characters.filter(function(c){return c.presence&&c.presence.appearCount===0&&c.charType!=='protagonist';});
+          return unused.map(function(c){return{action:'flag_unused_character',priority:3,reason:'角色「'+c.name+'」尚未在任何章节中出现',target:c.id,facts:{appearCount:0},confidence:0.6};});
+        },
+        validate:function(){return true;}},
+      {id:'arc_stagnation',priority:4,enabled:true,
+        condition:function(ctx){
+          var arc=ctx.analysis&&ctx.analysis.arc;
+          if(!arc||!arc.protagonist)return false;
+          if(arc.chapterCount<5)return false;
+          return !arc.protagonist.hasArcFields&&arc.protagonist.appearCount>=2;
+        },
+        action:function(ctx){
+          var arc=ctx.analysis.arc;
+          return{action:'flag_arc_stagnation',priority:4,
+            reason:'主角「'+arc.protagonist.name+'」已出现 '+arc.protagonist.appearCount+' 次、全书 '+arc.chapterCount+' 章，但没有 arcStage / goal / weakness 等成长弧光标记',
+            target:arc.protagonist.id,
+            facts:{chapterCount:arc.chapterCount,appearCount:arc.protagonist.appearCount,arcStage:arc.protagonist.arcStage,hasArcFields:arc.protagonist.hasArcFields},confidence:0.65};
+        },
+        validate:function(ctx,dec){return !!(dec&&dec.target);}},
+      {id:'chapter_hook_weak',priority:3,enabled:true,
+        condition:function(ctx){var ch=ctx.chapter;if(!ch||ch.index===0)return false;var content=ch.contentPreview||'';var hasHook=['？','?','！','!','突然','忽然','没想到','不料'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&ch.wordCount>200;},
+        action:function(ctx){return{action:'flag_weak_hook',priority:3,reason:'当前章节末尾缺少悬念钩子',facts:{wordCount:ctx.chapter.wordCount},confidence:0.5};},
+        validate:function(){return true;}},
+      {id:'ending_hook_missing',priority:3,enabled:true,
+        condition:function(ctx){var chapters=ctx.storyState.chapters;if(chapters.length<3)return false;var last=chapters[chapters.length-1];var content=(last.content||'').slice(-200);var hasHook=['？','?','！','!','突然','忽然','没想到','不料','究竟','到底'].some(function(k){return content.indexOf(k)>=0;});return !hasHook&&last.wordCount>200;},
+        action:function(ctx){var chapters=ctx.storyState.chapters;return{action:'flag_ending_hook',priority:3,reason:'最近章节结尾缺少悬念，读者可能失去追读动力',facts:{chapterCount:chapters.length},confidence:0.5};},
+        validate:function(){return true;}}
     ],
     getEnabledRules:function(){return this.rules.filter(function(r){return r.enabled;}).sort(function(a,b){return b.priority-a.priority;});},
     toggleRule:function(id){var r=this.rules.find(function(x){return x.id===id;});if(r){r.enabled=!r.enabled;}return r?r.enabled:false;},
     getRule:function(id){return this.rules.find(function(r){return r.id===id;});},
-    getRuleCount:function(){return this.rules.length;}
+    getRuleCount:function(){return this.rules.length;},
+    getCategories:function(){var out={};this.rules.forEach(function(r){out[r.category]=(out[r.category]||0)+1;});return out;}
   };
 
-  // --- Decision Layer ---
+  // Phase 5.3: Rule Contract 标准化（保留 id/priority/condition/action/validate 以兼容旧调用）
+  AIRuleRegistry.rules.forEach(function(rule){
+    var meta=RULE_META[rule.id]||{};
+    rule.ruleId=rule.id;
+    rule.name=meta.name||rule.id;
+    rule.description=meta.description||'';
+    rule.category=meta.category||'general';
+    // evaluate(context) -> { fired, decisions, rejected, error }
+    // 规则只做 Observe / Diagnose：condition -> validate -> decision（永不写状态）
+    rule.evaluate=function(ctx){
+      var out={fired:false,decisions:[],rejected:[]};
+      try{
+        if(!rule.condition(ctx))return out;
+        var result=rule.action(ctx);
+        var list=Array.isArray(result)?result:(result?[result]:[]);
+        out.fired=true;
+        list.forEach(function(dec){
+          if(!dec)return;
+          var verdict=(typeof rule.validate==='function')?rule.validate(ctx,dec):true;
+          AIRuleRegistry.validateCallCount++;
+          var valid=(verdict===true)||!!(verdict&&verdict.valid===true);
+          if(valid){out.decisions.push(dec);}
+          else{out.rejected.push({decision:dec,validation:verdict});}
+        });
+      }catch(e){out.error=String((e&&e.message)||e);}
+      return out;
+    };
+  });
+
+  // --- Decision Layer (Phase 5.3: decisions -> ConsistencyIssue + ActionProposal) ---
+  function entityTypeForAction(action){
+    var a=String(action||'');
+    if(a==='resolve_foreshadow')return'foreshadow';
+    if(a==='introduce_conflict')return'conflict';
+    if(a==='flag_timeline_conflict')return'timeline';
+    if(a==='flag_world_conflict')return'world';
+    if(a==='flag_relationship_issue')return'relationship';
+    if(a.indexOf('protagonist')>=0||a.indexOf('sidekick')>=0||a==='flag_inconsistency'||a==='flag_unused_character'||a==='flag_arc_stagnation'||a==='flag_power_conflict')return'character';
+    return'state';
+  }
+  // Phase 5.3: 让 Issue 真正绑定章节正文证据（excerpt === slice，绝不由程序编造）
+  function evidenceForDecision(dec,ctx){
+    if(dec&&Array.isArray(dec.evidence)&&dec.evidence.length)return dec.evidence;
+    var chapterId=(ctx.chapter&&ctx.chapter.id)||'';
+    var text=String((ctx.chapter&&ctx.chapter.content)||'');
+    if(!text)return[];
+    var needle=null;
+    if(dec&&dec.facts&&dec.facts.content)needle=String(dec.facts.content);
+    else if(dec&&dec.target){
+      var list=(ctx.storyState&&ctx.storyState.characters)||[];
+      var c=list.filter(function(x){return x.id===dec.target;})[0];
+      if(c&&c.name)needle=c.name;
+    }
+    var at=needle?text.indexOf(needle):-1;
+    var len=needle?needle.length:Math.min(text.length,40);
+    if(at<0||len<=0){at=0;len=Math.min(text.length,40);}
+    if(at+len>text.length)at=Math.max(0,text.length-len);
+    return[StoryContract.makeEvidence('chapter',chapterId,at,at+len,text.slice(at,at+len))];
+  }
   var AIDecisionLayer={
     evaluate:function(ctx){
-      var issues=[],decisions=[];
+      var issues=[],decisions=[],proposals=[],rejected=[];
       var rules=AIRuleRegistry.getEnabledRules();
       rules.forEach(function(rule){
-        try{
-          if(rule.condition(ctx)){
-            var actionResult=rule.action(ctx);
-            if(Array.isArray(actionResult)){
-              actionResult.forEach(function(dec){
-                issues.push({type:rule.id,severity:rule.priority>=8?'critical':rule.priority>=5?'warning':'info',message:rule.id,reason:dec.reason||rule.id});
-                dec.ruleId=rule.id;dec.confidence=rule.priority>=8?0.9:rule.priority>=5?0.7:0.5;dec.requiresApproval=dec.action.indexOf('introduce')>=0||dec.action.indexOf('create')>=0||dec.action.indexOf('resolve')>=0;
-                decisions.push(dec);
-              });
-            }else if(actionResult){
-              issues.push({type:rule.id,severity:rule.priority>=8?'critical':rule.priority>=5?'warning':'info',message:rule.id,reason:actionResult.reason||rule.id});
-              actionResult.ruleId=rule.id;actionResult.confidence=rule.priority>=8?0.9:rule.priority>=5?0.7:0.5;actionResult.requiresApproval=actionResult.action.indexOf('introduce')>=0||actionResult.action.indexOf('create')>=0||actionResult.action.indexOf('resolve')>=0;
-              decisions.push(actionResult);
-            }
+        var outcome=rule.evaluate(ctx);
+        if(outcome.error)console.error('[Rule] '+rule.id+' error: '+outcome.error);
+        var entityType=null;
+        outcome.decisions.forEach(function(dec){
+          entityType=entityTypeForAction(dec.action);
+          var evidence=evidenceForDecision(dec,ctx);
+          var issue=StoryContract.makeConsistencyIssue({
+            ruleId:rule.id,priority:rule.priority,category:rule.category,
+            title:rule.name,message:dec.reason||rule.id,
+            entityRef:(dec.target&&entityType!=='state')?StoryContract.makeEntityRef(entityType,dec.target,''):null,
+            evidence:evidence,
+            location:{chapterId:(ctx.chapter&&ctx.chapter.id)||'',chapterIndex:(ctx.chapter&&ctx.chapter.index)||0,path:rule.category},
+            facts:dec.facts||{},
+            suggestedFix:dec.suggestedFix||dec.reason||'',
+            suggestedChangeSet:null
+          });
+          var proposal=StoryContract.makeActionProposal({
+            actionType:dec.action,ruleId:rule.id,issueId:issue.issueId,
+            reason:dec.reason||'',evidence:evidence,
+            target:dec.target||null,
+            proposedChanges:[],
+            confidence:(typeof dec.confidence==='number')?dec.confidence:(rule.priority>=8?0.9:rule.priority>=5?0.7:0.5),
+            requiresApproval:true
+          });
+          var decision={
+            action:dec.action,target:dec.target||null,priority:rule.priority,reason:dec.reason||'',
+            ruleId:rule.id,issueId:issue.issueId,proposalId:proposal.actionId,actionId:proposal.actionId,
+            confidence:proposal.confidence,requiresApproval:true,
+            facts:dec.facts||{},evidence:evidence,entityType:entityType
+          };
+          // 候选动作：只作为 suggestedChangeSet（PROPOSED），绝不在此处落库
+          var suggested=ActionMigration.propose(decision,{storyState:ctx.storyState,chapter:ctx.chapter},{});
+          if(suggested){
+            issue.suggestedChangeSet=suggested;
+            proposal.proposedChanges=suggested.changes;
+            decision.suggestedChangeSetId=suggested.changeSetId;
           }
-        }catch(e){console.error('[Rule] '+rule.id+' error:',e);}
+          issues.push(issue);proposals.push(proposal);decisions.push(decision);
+        });
+        outcome.rejected.forEach(function(rj){
+          rejected.push({ruleId:rule.id,action:rj.decision?rj.decision.action:null,
+            reason:(rj.validation&&rj.validation.errors)?rj.validation.errors.join('; '):'rule validate rejected'});
+        });
       });
-      return{issues:issues,decisions:decisions};
+      return{issues:issues,decisions:decisions,proposals:proposals,rejected:rejected};
     }
   };
-
-  // --- Execution Layer ---
+  // --- Execution Layer (Phase 5.3: 任何 runtime 状态变更都必须经 ChangeSet -> StoryStore) ---
   var AIExecutionLayer={
-    _executedHashes:{},
-    _computeDecisionHash:function(decision,stateSig){return decision.action+'_'+(decision.target||'null')+'_'+stateSig;},
-    _getStateSignature:function(s){return's'+s.chapters.length+'_c'+s.conflicts.length+'_f'+s.foreshadowing.length+'_ch'+s.characters.length;},
-    resetExecutedHashes:function(){this._executedHashes={};},
+    lastChangeSets:[],
+    _deprecatedHashes:{},
+    // 兼容旧 API；幂等改由 ChangeSet 账本（changeSetId）+ before 前置条件负责
+    resetExecutedHashes:function(){this._deprecatedHashes={};},
     // Phase 5.1: apply a ChangeSet through the controlled StoryStore write path
     applyChangeSet:function(changeSet){
       var results=[];
@@ -1378,33 +1714,44 @@ var AIRuntime=(function(){
       StoryStore.persist();
       return results;
     },
-    execute:function(decisions){
-      var results=[];var s=StoryStore.state;var stateSig=this._getStateSignature(s);var self=this;
-      decisions.sort(function(a,b){return b.priority-a.priority;});
-      decisions.forEach(function(d){
-        var hash=self._computeDecisionHash(d,stateSig);
-        if(self._executedHashes[hash]){results.push({action:d.action,status:'skipped_idempotent',priority:d.priority,detail:'AI决策：已执行过，跳过'});return;}
-        var result=self._applyDecision(d,s);
-        if(result){results.push(result);self._executedHashes[hash]=true;}
+    proposeFor:function(decision,ctx,options){return ActionMigration.propose(decision,ctx,options||{});},
+    // Phase 5.3: 不再直接改状态；每个决策先转成 ChangeSet，再走 validate -> approve -> apply -> verify
+    execute:function(decisions,ctx){
+      var self=this;
+      var list=(Array.isArray(decisions)?decisions.slice():[]).sort(function(a,b){return (b.priority||0)-(a.priority||0);});
+      var results=[];
+      self.lastChangeSets=[];
+      list.forEach(function(d){
+        var cs=self.proposeFor(d,ctx||{},{});
+        if(!cs){
+          results.push({action:d.action,status:'no_change',priority:d.priority,target:d.target||null,
+            detail:'诊断类动作：不修改状态',ruleId:d.ruleId||'',issueId:d.issueId||'',changePaths:[]});
+          return;
+        }
+        var v=ChangeSetRuntime.validate(cs,{});
+        if(!v.ok){
+          results.push({action:d.action,status:'invalid',priority:d.priority,target:d.target||null,
+            detail:v.validation.errors.join('; '),ruleId:d.ruleId||'',issueId:d.issueId||'',
+            changeSetId:cs.changeSetId,changePaths:cs.changes.map(function(c){return c.path;})});
+          return;
+        }
+        ChangeSetRuntime.approve(cs,'compat:runtime.execute',{});
+        var res=ChangeSetRuntime.apply(cs,{});
+        self.lastChangeSets.push(cs);
+        results.push({action:d.action,status:res.ok?'applied':(res.status==='FAILED'?'failed':'refused'),
+          priority:d.priority,target:d.target||null,
+          detail:res.ok?('已应用 '+(res.results||[]).length+' 条变更'):(res.errors||[]).join('; '),
+          ruleId:d.ruleId||'',issueId:d.issueId||'',changeSetId:cs.changeSetId,
+          changePaths:cs.changes.map(function(c){return c.path;}),verify:res.verification||null});
       });
-      StoryStore.persist();
       return results;
     },
-    _applyDecision:function(d,s){
-      switch(d.action){
-        case'create_protagonist':s.narrative_state.aiSuggestions['create_protagonist']='[AI决策] 建议立即创建主角角色';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：创建主角'};
-        case'designate_protagonist':s.narrative_state.aiSuggestions['designate_protagonist']='[AI决策] 建议将现有角色设定为主角';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：指定主角'};
-        case'introduce_conflict':var hasSuggested=s.conflicts.some(function(c){return c.status==='suggested'&&c.description.indexOf('AI建议')>=0;});if(hasSuggested)return{action:d.action,status:'skipped',priority:d.priority,detail:'AI决策：已有建议冲突，跳过'};var cid='conf_'+s.chapters.length+'_'+s.conflicts.length+'_'+d.action;s.conflicts.push({id:cid,type:'person_vs_person',description:'AI建议：引入核心冲突',parties:[],status:'suggested',chapterStarted:s.chapters.length,chapterResolved:null});s.narrative_state.activeConflicts.push(cid);s.narrative_state.aiSuggestions['introduce_conflict']='[AI决策] 建议引入冲突';return{action:d.action,status:'created',priority:d.priority,detail:'AI决策：创建冲突',conflictId:cid};
-        case'resolve_foreshadow':var fs=s.foreshadowing.find(function(f){return f.id===d.target;});if(!fs)return null;fs.status='resolved';s.narrative_state.aiSuggestions['resolve_foreshadow_'+d.target]='[AI决策] 建议回收伏笔：「'+fs.content+'」';s.narrative_state.pendingForeshadows=s.narrative_state.pendingForeshadows.filter(function(id){return id!==d.target;});return{action:d.action,status:'targeted',priority:d.priority,detail:'AI决策：回收伏笔「'+fs.content+'」',target:d.target};
-        case'bring_protagonist_back':s.narrative_state.aiSuggestions['bring_protagonist_back']='[AI决策] 建议让主角重新出场';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：主角回归'};
-        case'increase_pace':s.narrative_state.aiSuggestions['increase_pace']='[AI决策] 建议加入突发事件加快节奏';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：加速节奏'};
-        case'introduce_sidekick':s.narrative_state.aiSuggestions['introduce_sidekick']='[AI决策] 建议引入配角';return{action:d.action,status:'decided',priority:d.priority,detail:'AI决策：引入配角'};
-        case'flag_inconsistency':case'flag_relationship_issue':case'flag_timeline_conflict':case'flag_world_conflict':case'flag_power_conflict':case'flag_unused_character':case'flag_arc_stagnation':case'flag_weak_hook':case'flag_ending_hook':s.narrative_state.aiSuggestions[d.action]='[AI诊断] '+d.reason;return{action:d.action,status:'flagged',priority:d.priority,detail:'AI诊断：'+d.reason,target:d.target};
-        default:return{action:d.action,status:'unknown',priority:d.priority||0};
-      }
+    // Phase 5.3: 直写已停用（保留 API 名以兼容旧调用，永不修改状态）
+    _applyDecision:function(d){
+      return{action:d?d.action:'',status:'deprecated_no_write',priority:d?d.priority:0,
+        detail:'Phase 5.3: _applyDecision 已停用，运行时变更一律经 ActionMigration -> ChangeSet'};
     }
   };
-
   // --- State Manager ---
   var StoryStateManager={
     snapshot:function(){return StoryStore.snapshot();},
@@ -1414,75 +1761,109 @@ var AIRuntime=(function(){
     hash:function(obj){return StoryStore.hash(obj);}
   };
 
-  // --- Action Plan System (Observe -> Analyze -> Plan -> Validate -> Approval -> Execute -> Verify) ---
+  // --- Action Plan System (Observe -> Analyze -> Plan -> Validate -> Policy -> Approval -> Execute -> Verify) ---
   var ActionPlanSystem={
     observe:function(chapterIdx){
-      // Sync chapter content into StoryState via StoryEngine
       var ch=StoryStore.getChapterByIdx(chapterIdx);
+      // MIGRATED: 章节同步内部经 StoryEngine.syncFromChapter 适配器 -> ChangeSet
       if(ch&&ch.content)StoryEngine.syncFromChapter(ch.content,chapterIdx);
       return{chapterIdx:chapterIdx,chapterTitle:ch?ch.title:'',wordCount:ch?ch.wordCount:0};
     },
     analyze:function(chapterIdx){
       var ctx=buildAIContext(chapterIdx);
       var result=AIDecisionLayer.evaluate(ctx);
-      var state={chapterCount:ctx.storyState.chapters.length,characterCount:ctx.storyState.characters.length,conflictCount:ctx.storyState.conflicts.length,pendingForeshadows:ctx.storyState.foreshadowing.length,avgWords:ctx.storyState.chapters.length>0?ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length:0};
-      return{issues:result.issues,decisions:result.decisions,state:state,context:ctx};
+      var score=ConsistencyScore.compute(result.issues);
+      var state={chapterCount:ctx.storyState.chapters.length,characterCount:ctx.storyState.characters.length,
+        conflictCount:ctx.storyState.conflicts.length,pendingForeshadows:ctx.storyState.foreshadowing.length,
+        avgWords:ctx.storyState.chapters.length>0?ctx.storyState.chapters.reduce(function(s,ch){return s+(ch.wordCount||0);},0)/ctx.storyState.chapters.length:0};
+      return{issues:result.issues,decisions:result.decisions,proposals:result.proposals,rejected:result.rejected,
+        score:score,state:state,context:ctx};
     },
     plan:function(analysis){
-      // Create action plans from decisions
-      var plans=analysis.decisions.map(function(d){
-        return{
-          id:d.action+'_'+(d.target||'all')+'_'+Date.now().toString(36),
-          ruleId:d.ruleId,
-          action:d.action,
-          target:d.target||null,
-          priority:d.priority,
-          reason:d.reason,
-          confidence:d.confidence||0.5,
-          requiresApproval:d.requiresApproval!==false,
-          status:'pending'
+      var issues=(analysis&&analysis.issues)||[];
+      return ((analysis&&analysis.decisions)||[]).map(function(d){
+        var issue=issues.filter(function(i){return i.issueId===d.issueId;})[0]||null;
+        var p={
+          id:'plan_'+StoryStore.hash({ruleId:d.ruleId,issueId:d.issueId,action:d.action,target:d.target||''}),
+          ruleId:d.ruleId,issueId:d.issueId,actionId:d.proposalId,action:d.action,target:d.target||null,
+          priority:d.priority,reason:d.reason,confidence:d.confidence,requiresApproval:true,status:'pending',
+          evidence:d.evidence||[],facts:d.facts||{},entityType:d.entityType||'state',
+          issue:issue,suggestedFix:(issue?issue.suggestedFix:''),policy:null,suggestedChangeSetId:null
         };
+        var cs=ActionMigration.propose(d,(analysis&&analysis.context)||{},{});
+        if(cs){
+          p.suggestedChangeSetId=cs.changeSetId;
+          p.policy=cs.policy||StoryPolicy.evaluateChangeSet(cs);
+        }else{
+          p.diagnosisOnly=true;
+          p.policy={allowed:true,requiresApproval:false,reason:'诊断类动作：不修改状态，仅提示'};
+        }
+        return p;
       });
-      return plans;
     },
     validate:function(plans){
-      // Check for duplicates and conflicts
-      var seen={};var valid=[];
-      plans.forEach(function(p){
+      var seen={},valid=[];
+      (plans||[]).forEach(function(p){
         var key=p.action+'_'+(p.target||'');
         if(seen[key])return;
         seen[key]=true;
         p.status='validated';
+        p.policy=p.policy||{allowed:true,requiresApproval:!!p.requiresApproval,reason:'规则允许'};
         valid.push(p);
       });
       return valid;
     },
-    executeWithApproval:function(plans,approvedIds){
+    executeWithApproval:function(plans,approvedIds,options){
       var before=StoryStateManager.snapshot();
-      var toExecute=plans.filter(function(p){return approvedIds.indexOf(p.id)>=0||!p.requiresApproval;});
-      var decisions=toExecute.map(function(p){return{action:p.action,target:p.target,priority:p.priority,reason:p.reason};});
-      var results=AIExecutionLayer.execute(decisions);
+      var ids=Array.isArray(approvedIds)?approvedIds:[];
+      var approved=(plans||[]).filter(function(p){return ids.indexOf(p.id)>=0;});
+      var decisions=approved.map(function(p){return{action:p.action,target:p.target,priority:p.priority,reason:p.reason,
+        ruleId:p.ruleId,issueId:p.issueId,actionId:p.actionId,confidence:p.confidence,evidence:p.evidence};});
+      var ctx=buildAIContext(Math.max(0,StoryStore.getChapters().length-1));
+      var results=AIExecutionLayer.execute(decisions,ctx);
       var after=StoryStateManager.snapshot();
       var diff=StoryStateManager.diff(before,after);
-      var verify=this.verify(before,after,results);
-      return{results:results,diff:diff,verified:verify};
+      var verified=this.verify(before,after,results,AIExecutionLayer.lastChangeSets);
+      return{results:results,changeSets:AIExecutionLayer.lastChangeSets,diff:diff,verified:verified};
     },
-    verify:function(before,after,results){
-      var changes=StoryStateManager.diff(before,after);
-      var hasChanges=Object.keys(changes).length>0;
-      var executedCount=results.filter(function(r){return r.status!=='skipped_idempotent'&&r.status!=='skipped';}).length;
-      var skippedCount=results.filter(function(r){return r.status==='skipped_idempotent'||r.status==='skipped';}).length;
-      return{hasChanges:hasChanges,executedCount:executedCount,skippedCount:skippedCount,stateHashBefore:StoryStateManager.hash(before),stateHashAfter:StoryStateManager.hash(after)};
+    // Phase 5.3: verify 重定义 —— 回答"实际有没有变化 / 变化了多少 / 哪些字段 / 是否符合预期"
+    verify:function(before,after,results,changeSets){
+      var sdiff=StoryStore.structuredDiff(before,after);
+      var changes=sdiff.changes;
+      var observed={};
+      changes.forEach(function(c){observed[c.path]=true;});
+      function covers(paths){
+        var list=Array.isArray(paths)?paths:[];
+        return list.some(function(p){
+          if(observed[p])return true;
+          return Object.keys(observed).some(function(o){return o.indexOf(p+'.')===0;});
+        });
+      }
+      var list=Array.isArray(results)?results:[];
+      var failedCount=list.filter(function(r){return r.status==='failed'||r.status==='invalid'||r.status==='refused';}).length;
+      var skippedCount=list.filter(function(r){return r.status==='no_change'||r.status==='skipped'||r.status==='skipped_idempotent';}).length;
+      var executedCount=list.filter(function(r){return r.status==='applied'&&covers(r.changePaths);}).length;
+      return{
+        success:failedCount===0,
+        hasChanges:changes.length>0,
+        changeCount:changes.length,
+        changes:changes,
+        executedCount:executedCount,
+        skippedCount:skippedCount,
+        failedCount:failedCount,
+        stateHashBefore:StoryStateManager.hash(before),
+        stateHashAfter:StoryStateManager.hash(after),
+        changeSetIds:(changeSets||[]).map(function(c){return c.changeSetId;}),
+        verifiedAt:Date.now()
+      };
     },
     runFull:function(chapterIdx){
       var obs=this.observe(chapterIdx);
       var analysis=this.analyze(chapterIdx);
-      var plans=this.plan(analysis);
-      var validated=this.validate(plans);
-      return{observe:obs,analysis:analysis,plans:validated};
+      var plans=this.validate(this.plan(analysis));
+      return{observe:obs,analysis:analysis,plans:plans,score:analysis.score,proposals:analysis.proposals,rejected:analysis.rejected};
     }
   };
-
   // --- Scene Tests ---
   function injectTestState(testState){
     var original=StoryStore.snapshot();
@@ -1513,9 +1894,66 @@ var AIRuntime=(function(){
     StateManager:StoryStateManager,
     ActionPlan:ActionPlanSystem,
     analyze:function(chapterIdx){return ActionPlanSystem.analyze(chapterIdx);},
-    execute:function(decisions){return AIExecutionLayer.execute(decisions);},
-    run:function(chapterIdx){var a=this.analyze(chapterIdx);var snap=StoryStateManager.snapshot();var exec=AIExecutionLayer.execute(a.decisions);StoryStore.setNarrativeState('lastAnalysis',1);return{analysis:a,executed:exec,timestamp:0,snapshotHash:StoryStateManager.hash(snap)};},
+    execute:function(decisions,ctx){return AIExecutionLayer.execute(decisions,ctx);},
+    // Phase 5.3: run() 不再直写状态；所有写入经 ActionMigration -> ChangeSet（审批记录在审计账本）
+    run:function(chapterIdx){
+      var a=this.analyze(chapterIdx);
+      var snap=StoryStateManager.snapshot();
+      var ctx=a.context||buildAIContext(chapterIdx);
+      var exec=AIExecutionLayer.execute(a.decisions,ctx);
+      if(StoryStore.getNarrativeState().lastAnalysis!==1)StoryStore.setNarrativeState('lastAnalysis',1);
+      var after=StoryStateManager.snapshot();
+      var verified=ActionPlanSystem.verify(snap,after,exec,AIExecutionLayer.lastChangeSets);
+      return{analysis:a,executed:exec,timestamp:0,snapshotHash:StoryStateManager.hash(snap),
+        verified:verified,changeSetIds:AIExecutionLayer.lastChangeSets.map(function(c){return c.changeSetId;}),
+        stateHashAfter:StoryStateManager.hash(after)};
+    },
     runActionPlan:function(chapterIdx){return ActionPlanSystem.runFull(chapterIdx);},
+    // ===== Phase 5.3: 一致性报告（页面与测试共用同一实现）=====
+    consistencyReport:function(chapterIdx){
+      var idx=(typeof chapterIdx==='number'&&chapterIdx>=0)?chapterIdx:Math.max(0,StoryStore.getChapters().length-1);
+      var analysis=ActionPlanSystem.analyze(idx);
+      return{chapterIdx:idx,score:analysis.score,totalIssues:analysis.issues.length,
+        blockingIssues:analysis.score.blockingIssues,warnings:analysis.score.warnings,
+        errors:analysis.score.errors,infos:analysis.score.infos,
+        issues:analysis.issues,proposals:analysis.proposals,rejected:analysis.rejected,
+        plans:ActionPlanSystem.validate(ActionPlanSystem.plan(analysis))};
+    },
+    ruleContracts:function(){return AIRuleRegistry.rules.map(function(r){
+      return{ruleId:r.ruleId,name:r.name,description:r.description,category:r.category,priority:r.priority,enabled:r.enabled};});},
+    ruleValidateCallCount:function(){return AIRuleRegistry.validateCallCount;},
+    actionMigrationMatrix:function(){return ActionMigration.matrix();},
+    evaluateContext:function(chapterIdx){return buildAIContext(chapterIdx);},
+    // ===== Phase 5.3: 审计链 / 批准 / 拒绝 =====
+    auditTrail:function(){
+      return (StoryStore.getChangeLedger()||[]).map(function(e){
+        return{changeSetId:e.changeSetId,source:e.source,operation:e.operation,
+          chapterId:e.chapterId||'',ruleId:e.ruleId||'',issueId:e.issueId||'',actionId:e.actionId||'',
+          stateChanges:e.changes||[],execution:{status:e.status,appliedCount:e.appliedCount||0},
+          verify:{hasChanges:e.stateHashBefore!==e.stateHashAfter,changeCount:(e.changes||[]).length,
+            stateHashBefore:e.stateHashBefore,stateHashAfter:e.stateHashAfter}};
+      });
+    },
+    actionDecisions:function(){return StoryStore.getActionDecisions();},
+    applyPlan:function(plan,options){
+      if(!plan)return{ok:false,status:'REJECTED',errors:['plan: required']};
+      var res=ActionPlanSystem.executeWithApproval([plan],[plan.id],options||{});
+      var verified=res.verified||{};
+      var ok=!!verified.success&&!!verified.hasChanges;
+      StoryStore.appendActionDecision({planId:plan.id,actionId:plan.actionId||'',ruleId:plan.ruleId||'',
+        issueId:plan.issueId||'',action:plan.action,decision:ok?'approved':'failed',
+        changeSetIds:(verified.changeSetIds||[]),hasChanges:!!verified.hasChanges,
+        changeCount:verified.changeCount||0,executedCount:verified.executedCount||0,
+        reason:ok?'已执行并验证':'未产生已验证的状态变化',at:Date.now()});
+      return{ok:ok,status:ok?'VERIFIED':'FAILED',verified:verified,results:res.results,changeSets:res.changeSets};
+    },
+    rejectPlan:function(plan,reason){
+      if(!plan)return{ok:false,status:'REJECTED',errors:['plan: required']};
+      StoryStore.appendActionDecision({planId:plan.id,actionId:plan.actionId||'',ruleId:plan.ruleId||'',
+        issueId:plan.issueId||'',action:plan.action,decision:'rejected',changeSetIds:[],
+        hasChanges:false,changeCount:0,executedCount:0,reason:String(reason||'作者拒绝'),at:Date.now()});
+      return{ok:true,status:'REJECTED'};
+    },
     // ===== Phase 5.1: ChangeSet lifecycle (Proposal -> Validation -> Approval -> Apply -> Verify) =====
     proposeChangeSet:function(input,options){return ChangeSetRuntime.propose(input,options);},
     validateChangeSet:function(changeSet,options){return ChangeSetRuntime.validate(changeSet,options);},
@@ -2192,7 +2630,395 @@ var AIRuntime=(function(){
       });
       t(69,'非法 proposal 不改状态',invalidProposalSafe);
 
+      // ===== Phase 5.3 tests (70-104): Runtime Action Migration & Explainable Consistency =====
+      function mkChapters(n,text){
+        var out=[];
+        for(var i=0;i<n;i++){
+          out.push({id:'chapter_00'+(i+1),title:'第'+(i+1)+'章',content:(text||'林默走了。'),wordCount:120,
+            status:'已完成',order:i,
+            aiAnalysis:{characters:['林默'],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}});
+        }
+        return out;
+      }
+      function mkChar(id,name,charType,extra){
+        var c={id:id,name:name,charType:charType||'supporting',tags:[],aliases:[],fields:{},relations:[],
+          presence:{firstAppear:0,lastAppear:1,chapterIds:[0,1],appearCount:2},
+          aiProfile:{arcStage:'',consistencyScore:100,importance:5}};
+        if(extra)for(var k in extra)c[k]=extra[k];
+        return c;
+      }
+      function p53Fixture(opts){
+        opts=opts||{};
+        return{
+          meta:{title:'P53',genre:'fantasy'},
+          chapters:opts.chapters||mkChapters(opts.nChapters||2),
+          characters:opts.characters||[mkChar('char_001','林默','protagonist',{aiProfile:{arcStage:'',consistencyScore:100,importance:10}})],
+          world:opts.world||{setting:{},locations:[],factions:[],rules:[]},
+          timeline:opts.timeline||[],
+          foreshadowing:opts.foreshadowing||[],
+          conflicts:opts.conflicts||[],
+          narrative_state:opts.narrative_state||{currentArc:'',paceScore:0,tensionLevel:0,activeConflicts:[],
+            pendingForeshadows:[],characterPresence:{},lastAnalysis:0,aiSuggestions:{},issues:[],changeLedger:[],actionDecisions:[]}
+        };
+      }
+      function planFor(report,action){
+        return ((report&&report.plans)||[]).filter(function(p){return p.action===action;})[0]||null;
+      }
+
+      // --- 70-79: Consistency 页面 / 规则 / Issue 契约 ---
+      var uiPage=withState(p53Fixture({nChapters:3}),function(){
+        var report=runConsistencyCheck();
+        return !!report&&typeof report.score.score==='number'&&Array.isArray(report.issues)&&Array.isArray(report.plans)&&
+          typeof report.blockingIssues==='number'&&typeof report.warnings==='number';
+      });
+      t(70,'Consistency 页面可执行并返回报告契约',uiPage);
+
+      var validateInvoked=withState(p53Fixture({nChapters:3}),function(){
+        var before=AIRuntime.ruleValidateCallCount();
+        AIRuntime.consistencyReport(1);
+        var after=AIRuntime.ruleValidateCallCount();
+        return after>before;
+      });
+      t(71,'Rule.validate() 真正被调用',validateInvoked);
+
+      var deadWorld=withState(p53Fixture({world:{setting:{},locations:[],factions:[],
+        rules:[{id:'r1',text:'不可飞行'},{id:'r1',text:'必须飞行'},{id:'r2',text:'x',locationId:'missing_loc'}]}}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var issue=report.issues.filter(function(i){return i.ruleId==='world_rule_conflict';})[0];
+        return !!issue&&issue.facts.duplicateRules.length>=1&&issue.facts.missingScopes.indexOf('missing_loc')>=0;
+      });
+      t(72,'死规则修复: world_rule_conflict（world 进入上下文）',deadWorld);
+
+      var deadChar=withState(p53Fixture({characters:[
+        mkChar('char_001','林默','protagonist',{aiProfile:{arcStage:'成长期',consistencyScore:100,importance:10}}),
+        mkChar('char_002','幽灵','supporting',{relations:[{targetId:'nobody',type:'仇敌'}],presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0}})
+      ]}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var issue=report.issues.filter(function(i){return i.ruleId==='character_inconsistency';})[0];
+        return !!issue&&issue.facts.score<60&&!!issue.entityRef&&issue.entityRef.entityId==='char_002';
+      });
+      t(73,'死规则修复: character_inconsistency（确定性评分）',deadChar);
+
+      var deadArc=withState(p53Fixture({nChapters:5,characters:[
+        mkChar('char_001','林默','protagonist',{presence:{firstAppear:0,lastAppear:4,chapterIds:[0,1,2],appearCount:3},
+          aiProfile:{arcStage:'',consistencyScore:100,importance:10}})
+      ]}),function(){
+        var report=AIRuntime.consistencyReport(4);
+        var issue=report.issues.filter(function(i){return i.ruleId==='arc_stagnation';})[0];
+        return !!issue&&issue.facts.chapterCount===5&&issue.facts.hasArcFields===false&&
+          !!issue.entityRef&&issue.entityRef.entityType==='character';
+      });
+      t(74,'死规则修复: arc_stagnation（可评估叙事状态）',deadArc);
+
+      var deadPower=withState(p53Fixture({nChapters:3,characters:[
+        mkChar('char_001','林默','protagonist',{fields:{ability:'元婴期'},aiProfile:{arcStage:'',consistencyScore:100,importance:10}})
+      ]}),function(){
+        var report=AIRuntime.consistencyReport(2);
+        var issue=report.issues.filter(function(i){return i.ruleId==='power_level_conflict';})[0];
+        return !!issue&&issue.facts.index===3&&issue.facts.ceiling===0;
+      });
+      t(75,'死规则修复: power_level_conflict（确定性境界判定）',deadPower);
+
+      var scoreDet=withState(p53Fixture({nChapters:3}),function(){
+        var a=AIRuntime.consistencyReport(1).score;
+        var b=AIRuntime.consistencyReport(1).score;
+        var base=ConsistencyScore.compute([]);
+        var mixed=ConsistencyScore.compute([{severity:'blocking'},{severity:'warning'},{severity:'info'}]);
+        return a.score===b.score&&base.score===100&&mixed.score===100-15-3-1&&
+          mixed.blockingIssues===1&&mixed.warnings===1&&mixed.infos===1&&mixed.totalIssues===3;
+      });
+      t(76,'确定性一致性评分（同状态同分、可解释下降）',scoreDet);
+
+      var issueContract=withState(p53Fixture({nChapters:3}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var issue=report.issues[0];
+        var keys=['issueId','ruleId','severity','category','title','message','entityRef','evidence','location',
+          'facts','suggestedFix','suggestedChangeSet','createdAt'];
+        var hasAll=keys.every(function(k){return k in issue;});
+        return hasAll&&issue.issueId.indexOf('ci_')===0&&StoryContract.validateConsistencyIssue(issue,1).valid&&
+          ['blocking','error','warning','info'].indexOf(issue.severity)>=0&&!!issue.location&&!!issue.facts;
+      });
+      t(77,'ConsistencyIssue contract 13 字段完整',issueContract);
+
+      var issueEvidence=withState(p53Fixture({nChapters:3}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var issue=report.issues[0];
+        var ev=issue.evidence[0];
+        var text=StoryStore.getChapter('chapter_002').content;
+        return !!ev&&ev.sourceType==='chapter'&&ev.sourceId==='chapter_002'&&
+          ev.excerpt===text.slice(ev.start,ev.end)&&StoryContract.validateEvidence(ev,text).valid;
+      });
+      t(78,'Issue 携带绑定正文的 Evidence',issueEvidence);
+
+      var issueRef=withState(p53Fixture({characters:[
+        mkChar('char_001','林默','supporting',{presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0}}),
+        mkChar('char_002','苏晚','protagonist',{presence:{firstAppear:0,lastAppear:1,chapterIds:[0,1],appearCount:2}})
+      ]}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var issue=report.issues.filter(function(i){return i.ruleId==='unused_character';})[0];
+        return !!issue&&!!issue.entityRef&&issue.entityRef.entityType==='character'&&issue.entityRef.entityId==='char_001';
+      });
+      t(79,'Issue 携带 entityRef',issueRef);
+
+      // --- 80-85: 候选 ChangeSet 与各 Action 的真实迁移 ---
+      var suggestedCs=withState(p53Fixture({nChapters:3}),function(){
+        var report=AIRuntime.consistencyReport(2);
+        var plan=planFor(report,'introduce_conflict');
+        var issue=report.issues.filter(function(i){return i.ruleId==='no_conflict';})[0];
+        return !!plan&&!!plan.suggestedChangeSetId&&plan.suggestedChangeSetId.indexOf('cs_')===0&&
+          !!issue&&!!issue.suggestedChangeSet&&issue.suggestedChangeSet.status==='PROPOSED'&&
+          !!plan.policy&&typeof plan.policy.allowed==='boolean';
+      });
+      t(80,'Issue/Plan 携带候选 ChangeSet 与 Policy',suggestedCs);
+
+      var conflictAction=withState(p53Fixture({nChapters:3}),function(){
+        var before=StoryStore.getConflicts().length;
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        var after1=StoryStore.getConflicts().length;
+        var plan2=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res2=plan2?AIRuntime.applyPlan(plan2):{ok:false};
+        var after2=StoryStore.getConflicts().length;
+        return before===0&&res.ok&&after1===1&&!res2.ok&&after2===1&&res.verified.changeCount>0;
+      });
+      t(81,'introduce_conflict 迁移：真实写 conflicts 且不重复',conflictAction);
+
+      var fsAction=withState(p53Fixture({chapters:mkChapters(2,'林默与玉佩。'),
+        foreshadowing:[{id:'fs_001',content:'玉佩',chapterPlaced:1,chapterExpected:1,status:'pending',note:'',linkedChapterId:null}]}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var plan=planFor(report,'resolve_foreshadow');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        return !!plan&&plan.evidence.length>0&&res.ok&&StoryStore.getForeshadow('fs_001').status==='resolved'&&
+          StoryStore.getNarrativeState().pendingForeshadows.indexOf('fs_001')<0;
+      });
+      t(82,'resolve_foreshadow 迁移：真实回收伏笔（含 evidence）',fsAction);
+
+      var createProtag=withState(p53Fixture({chapters:[],characters:[]}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(0),'create_protagonist');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        var chars=StoryStore.getCharacters();
+        return !!plan&&res.ok&&chars.length===1&&chars[0].charType==='protagonist'&&res.verified.executedCount>=1;
+      });
+      t(83,'create_protagonist 迁移：真实创建主角',createProtag);
+
+      var designate=withState(p53Fixture({characters:[mkChar('char_001','林默','supporting')]}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(1),'designate_protagonist');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        return !!plan&&res.ok&&StoryStore.getCharacter('char_001').charType==='protagonist';
+      });
+      t(84,'designate_protagonist 迁移：真实修改 charType',designate);
+
+      var sidekick=withState(p53Fixture({characters:[
+        mkChar('char_001','林默','protagonist',{aiProfile:{arcStage:'成长期',consistencyScore:100,importance:10}}),
+        mkChar('char_002','苏晚','antagonist')
+      ]}),function(){
+        var before=StoryStore.getCharacters().length;
+        var plan=planFor(AIRuntime.consistencyReport(1),'introduce_sidekick');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        var after=StoryStore.getCharacters().length;
+        var supporting=StoryStore.getCharacters().filter(function(c){return c.charType==='supporting';});
+        return !!plan&&res.ok&&after===before+1&&supporting.length===1;
+      });
+      t(85,'introduce_sidekick 迁移：真实创建配角',sidekick);
+
+      // --- 86-94: 安全（批准 / 直写 / verify / 幂等 / stale） ---
+      var approvalSafe=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var res=AIRuntime.ActionPlan.executeWithApproval([plan],[]);
+        return !!plan&&!res.verified.hasChanges&&res.verified.changeCount===0&&
+          StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getConflicts().length===0;
+      });
+      t(86,'未批准不写入（必须显式批准）',approvalSafe);
+
+      var bypassRejected=withState(p53Fixture({nChapters:3}),function(){
+        var before=StoryStore.getConflicts().length;
+        var res=AIRuntime.ExecutionLayer._applyDecision({action:'introduce_conflict',priority:8});
+        var after=StoryStore.getConflicts().length;
+        var rg=AIRuntime.run(2);
+        var viaCs=StoryStore.getChangeLedger().filter(function(e){return (e.source||'').indexOf('ActionMigration.')===0;});
+        return res.status==='deprecated_no_write'&&before===after&&viaCs.length>=1&&!!rg.verified;
+      });
+      t(87,'直写旁路移除：_applyDecision 不写状态、run() 经 ChangeSet',bypassRejected);
+
+      var verifyReal=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res=AIRuntime.ActionPlan.executeWithApproval([plan],[plan.id]);
+        var v=res.verified;
+        return v.success&&v.hasChanges&&v.changeCount>0&&v.executedCount===1&&v.failedCount===0&&
+          v.stateHashBefore!==v.stateHashAfter&&v.changes.length===v.changeCount;
+      });
+      t(88,'verify 反映真实状态变化（changeCount / executedCount）',verifyReal);
+
+      var verifyZero=withState(p53Fixture(),function(){
+        var s=StoryStore.snapshot();
+        var v=AIRuntime.ActionPlan.verify(s,s,[]);
+        return v.success&&!v.hasChanges&&v.changeCount===0&&v.executedCount===0&&v.skippedCount===0&&
+          v.stateHashBefore===v.stateHashAfter;
+      });
+      t(89,'verify 零变化语义正确',verifyZero);
+
+      var actionRollback=withState(p53Fixture({nChapters:3}),function(){
+        StoryStore.addConflict({id:'conf_existing',description:'existing',status:'resolved'});
+        var ctx=AIRuntime.evaluateContext(2);
+        var cs=AIRuntime.ActionMigration.propose({action:'introduce_conflict',priority:8,reason:'x'},ctx,{});
+        cs.changes.push(StoryContract.makeStateChange({
+          changeId:StoryContract.makeChangeId(cs.changeSetId,'conflicts.conf_existing',99),
+          actionId:'forced-fail',type:'add',
+          target:StoryContract.makeEntityRef('conflict','conf_existing','existing'),
+          path:'conflicts.conf_existing',before:null,after:{id:'conf_existing'},
+          reason:'forced failure',evidence:[],timestamp:1}));
+        ChangeSetRuntime.validate(cs,{});
+        ChangeSetRuntime.approve(cs,'t',{});
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var res=ChangeSetRuntime.apply(cs,{});
+        return !res.ok&&cs.status==='FAILED'&&StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getConflicts().length===1;
+      });
+      t(90,'执行失败时原子回滚（Action ChangeSet）',actionRollback);
+
+      var rejectPersist=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res=AIRuntime.rejectPlan(plan,'作者忽略');
+        var decisions=StoryStore.getActionDecisions();
+        return !!plan&&res.status==='REJECTED'&&decisions.length===1&&decisions[0].decision==='rejected'&&
+          decisions[0].planId===plan.id&&decisions[0].ruleId==='no_conflict'&&StoryStore.getConflicts().length===0;
+      });
+      t(91,'拒绝写入审计（REJECTED 持久化）',rejectPersist);
+
+      var dupAction=withState(p53Fixture({nChapters:3}),function(){
+        AIRuntime.run(2);
+        var c1=StoryStore.getConflicts().length;
+        var r2=AIRuntime.run(2);
+        var c2=StoryStore.getConflicts().length;
+        return c1===1&&c2===1&&r2.verified.changeCount===0;
+      });
+      t(92,'重复执行不产生重复冲突（内容不变 → 0 重复变更）',dupAction);
+
+      var dupCs=withState(p53Fixture({nChapters:3}),function(){
+        var ctx=AIRuntime.evaluateContext(2);
+        var cs=AIRuntime.ActionMigration.propose({action:'introduce_conflict',priority:8,reason:'x'},ctx,{});
+        ChangeSetRuntime.validate(cs,{});
+        ChangeSetRuntime.approve(cs,'t',{});
+        var first=ChangeSetRuntime.apply(cs,{});
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var second=ChangeSetRuntime.apply(cs,{});
+        return first.ok&&!second.ok&&second.errors.indexOf('duplicate_changeset')>=0&&
+          StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getConflicts().length===1;
+      });
+      t(93,'重复 ChangeSet 不重复执行（Action 路径）',dupCs);
+
+      var stateChangeAllows=withState(p53Fixture({nChapters:3}),function(){
+        AIRuntime.run(2);
+        var conflict=StoryStore.getConflicts()[0];
+        var rm=ChangeSetRuntime.propose({source:'test',operation:'remove_conflict',changes:[
+          {actionId:'rm',type:'remove',target:{entityType:'conflict',entityId:conflict.id,displayName:''},
+           path:'conflicts.'+conflict.id,before:conflict,after:null,reason:'清理冲突'}]});
+        ChangeSetRuntime.validate(rm,{});
+        ChangeSetRuntime.approve(rm,'t',{});
+        ChangeSetRuntime.apply(rm,{});
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        return StoryStore.getConflicts().length===0&&!!plan&&!!plan.suggestedChangeSetId;
+      });
+      t(94,'状态变化后允许产生新的合法动作',stateChangeAllows);
+
+      // --- 95-99: 审计链与迁移矩阵 ---
+      var auditTrail=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        AIRuntime.applyPlan(plan);
+        var trail=AIRuntime.auditTrail();
+        var e=trail[0];
+        return trail.length>=1&&e.ruleId==='no_conflict'&&!!e.issueId&&!!e.actionId&&
+          e.changeSetId===plan.suggestedChangeSetId&&e.stateChanges.length>0&&e.verify.hasChanges;
+      });
+      t(95,'审计链 ruleId→issueId→actionId→changeSetId→verify',auditTrail);
+
+      var ruleTrace=withState(p53Fixture({nChapters:3}),function(){
+        var report=AIRuntime.consistencyReport(2);
+        var contracts=AIRuntime.ruleContracts();
+        var ids=contracts.map(function(c){return c.ruleId;});
+        var allValid=report.issues.every(function(i){return ids.indexOf(i.ruleId)>=0;});
+        var contract=contracts.filter(function(c){return c.ruleId==='no_conflict';})[0];
+        return contracts.length===16&&allValid&&!!contract&&!!contract.name&&!!contract.description&&
+          !!contract.category&&report.issues.every(function(i){return i.issueId.indexOf('ci_')===0;});
+      });
+      t(96,'rule → issue 可追溯（Rule Contract 16 条）',ruleTrace);
+
+      var actionTrace=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res=AIRuntime.applyPlan(plan);
+        var e=AIRuntime.auditTrail().filter(function(x){return x.changeSetId===plan.suggestedChangeSetId;})[0];
+        return res.ok&&!!e&&e.source==='ActionMigration.introduce_conflict'&&e.actionId===plan.actionId;
+      });
+      t(97,'action → ChangeSet 可追溯',actionTrace);
+
+      var csVerifyTrace=withState(p53Fixture({nChapters:3}),function(){
+        var plan=planFor(AIRuntime.consistencyReport(2),'introduce_conflict');
+        var res=AIRuntime.applyPlan(plan);
+        var e=AIRuntime.auditTrail()[0];
+        return res.ok&&!!e&&e.verify.hasChanges&&e.verify.changeCount>0&&
+          e.verify.stateHashBefore!==e.verify.stateHashAfter&&e.execution.status==='VERIFIED';
+      });
+      t(98,'ChangeSet → verify 可追溯',csVerifyTrace);
+
+      var matrixOk=withState(p53Fixture(),function(){
+        var m=AIRuntime.actionMigrationMatrix();
+        var migrated=m.filter(function(x){return x.status==='MIGRATED';});
+        var diag=m.filter(function(x){return x.status==='MIGRATED_DIAGNOSIS_ONLY';});
+        return m.length===16&&migrated.length===5&&diag.length===11&&
+          m.every(function(x){return x.viaChangeSet===true&&x.legacyPath===false;})&&
+          migrated.every(function(x){return x.writesState&&x.requiresApproval;})&&
+          diag.every(function(x){return !x.writesState;});
+      });
+      t(99,'Runtime Migration Matrix：16 个 Action 无 legacy 路径',matrixOk);
+
+      // --- 100-104: UI 契约与收口验证 ---
+      var uiContract=withState(p53Fixture({nChapters:3}),function(){
+        var report=runConsistencyCheck();
+        var keys=['chapterIdx','score','totalIssues','blockingIssues','warnings','errors','infos','issues','proposals','rejected','plans'];
+        return keys.every(function(k){return k in report;})&&report.score.score>=0&&report.score.score<=100&&
+          typeof report.blockingIssues==='number'&&typeof report.warnings==='number'&&Array.isArray(report.plans);
+      });
+      t(100,'UI 一致性输出契约',uiContract);
+
+      var msgOk=applyResultMessage({ok:true,verified:{hasChanges:true,executedCount:2,changeCount:3}});
+      var msgZero=applyResultMessage({ok:true,verified:{hasChanges:false,executedCount:0,changeCount:0}});
+      var msgFail=applyResultMessage({ok:false,verified:{success:false,failedCount:1,hasChanges:false},results:[{status:'failed',detail:'boom'}]});
+      t(101,'UI 执行结果契约（不会假报成功）',
+        msgOk.indexOf('已执行')===0&&msgZero.indexOf('状态未变化')>=0&&msgFail.indexOf('执行失败')>=0);
+
+      var diagnosisNoChange=withState(p53Fixture({nChapters:3}),function(){
+        var report=AIRuntime.consistencyReport(1);
+        var plan=planFor(report,'increase_pace');
+        var res=plan?AIRuntime.applyPlan(plan):{ok:false};
+        var decisions=StoryStore.getActionDecisions();
+        var businessUnchanged=(StoryStore.getConflicts().length===0&&StoryStore.getCharacters().length===1&&
+          Object.keys(StoryStore.state.narrative_state.aiSuggestions||{}).length===0);
+        return !!plan&&plan.diagnosisOnly===true&&!res.ok&&businessUnchanged&&
+          decisions.length===1&&decisions[0].hasChanges===false&&decisions[0].decision==='failed';
+      });
+      t(102,'诊断类动作不修改状态（明确提示未变化）',diagnosisNoChange);
+
+      var uiReject=withState(p53Fixture({nChapters:3}),function(){
+        curChId=StoryStore.getChapters()[0].id;
+        var rc=runCopilot();
+        var plan=((rc&&rc.plans)||[])[0];
+        var res=plan?rejectAction(plan.id):{ok:false};
+        var decisions=StoryStore.getActionDecisions();
+        return !!plan&&res.ok&&res.status==='REJECTED'&&decisions.length===1&&decisions[0].decision==='rejected'&&
+          (_lastActionPlans||[]).some(function(p){return p.id===plan.id&&p.status==='rejected';});
+      });
+      t(103,'UI 拒绝：保留计划并写入审计',uiReject);
+
+      var noSuggestions=withState(p53Fixture({nChapters:3}),function(){
+        var before=StoryStore.hash(StoryStore.state.narrative_state.aiSuggestions||{});
+        AIRuntime.run(2);
+        var after=StoryStore.hash(StoryStore.state.narrative_state.aiSuggestions||{});
+        return before===after&&Object.keys(StoryStore.state.narrative_state.aiSuggestions||{}).length===0;
+      });
+      t(104,'Action 迁移后不再写 aiSuggestions',noSuggestions);
+
       return{results:results,allPass:results.every(function(r){return r.pass;})};
+
     }
   };
 })();
@@ -2348,9 +3174,81 @@ var StoryContract=(function(){
     return makeValidationResult(errors.length===0,errors,warnings,at);
   }
 
+  // ===== Phase 5.3: ConsistencyIssue / ActionProposal contracts (pure data) =====
+  function severityFromPriority(priority){
+    var p=(typeof priority==='number')?priority:0;
+    if(p>=9)return'blocking';
+    if(p>=7)return'error';
+    if(p>=5)return'warning';
+    return'info';
+  }
+  function makeConsistencyIssue(fields){
+    fields=fields||{};
+    var issue={
+      issueId:'',
+      ruleId:String(fields.ruleId||''),
+      severity:fields.severity||severityFromPriority(fields.priority),
+      category:String(fields.category||'general'),
+      title:String(fields.title||fields.ruleId||''),
+      message:String(fields.message||''),
+      entityRef:fields.entityRef?makeEntityRef(fields.entityRef.entityType,fields.entityRef.entityId,fields.entityRef.displayName):null,
+      evidence:(Array.isArray(fields.evidence)?fields.evidence:[]).map(function(e){
+        return makeEvidence(e&&e.sourceType,e&&e.sourceId,e&&e.start,e&&e.end,e&&e.excerpt);
+      }),
+      location:fields.location?{chapterId:String(fields.location.chapterId||''),
+        chapterIndex:(typeof fields.location.chapterIndex==='number'?fields.location.chapterIndex:-1),
+        path:String(fields.location.path||'')}:null,
+      facts:fields.facts||{},
+      suggestedFix:String(fields.suggestedFix||''),
+      suggestedChangeSet:fields.suggestedChangeSet||null,
+      createdAt:(typeof fields.createdAt==='number')?fields.createdAt:0
+    };
+    issue.issueId='ci_'+StoryStore.hash({ruleId:issue.ruleId,
+      entity:issue.entityRef?issue.entityRef.entityId:'',location:issue.location,facts:issue.facts});
+    return issue;
+  }
+  function makeActionProposal(fields){
+    fields=fields||{};
+    var proposal={
+      actionId:'',
+      actionType:String(fields.actionType||''),
+      reason:String(fields.reason||''),
+      evidence:(Array.isArray(fields.evidence)?fields.evidence:[]).map(function(e){
+        return makeEvidence(e&&e.sourceType,e&&e.sourceId,e&&e.start,e&&e.end,e&&e.excerpt);
+      }),
+      proposedChanges:(Array.isArray(fields.proposedChanges)?fields.proposedChanges:[]).slice(),
+      ruleId:String(fields.ruleId||''),
+      issueId:String(fields.issueId||''),
+      target:fields.target||null,
+      confidence:(typeof fields.confidence==='number')?fields.confidence:null,
+      requiresApproval:fields.requiresApproval!==false
+    };
+    proposal.actionId='ap_'+StoryStore.hash({ruleId:proposal.ruleId,issueId:proposal.issueId,type:proposal.actionType,target:proposal.target});
+    return proposal;
+  }
+  function validateConsistencyIssue(issue,checkedAt){
+    var errors=[],warnings=[];
+    var at=(typeof checkedAt==='number')?checkedAt:0;
+    if(!isPlainObject(issue))return makeValidationResult(false,['issue: expected object'],[],at);
+    if(!issue.issueId||String(issue.issueId).indexOf('ci_')!==0)errors.push('issueId: must be a ci_ id');
+    if(!issue.ruleId)errors.push('ruleId: required');
+    if(['blocking','error','warning','info'].indexOf(issue.severity)<0)errors.push('severity: unknown '+issue.severity);
+    if(typeof issue.message!=='string')errors.push('message: expected string');
+    if(!('entityRef' in issue))errors.push('entityRef: required (may be null)');
+    if(!Array.isArray(issue.evidence))errors.push('evidence: expected array');
+    if(!issue.location||typeof issue.location!=='object')errors.push('location: required');
+    if(!issue.facts||typeof issue.facts!=='object')errors.push('facts: expected object');
+    if(typeof issue.suggestedFix!=='string')errors.push('suggestedFix: expected string');
+    var fnPaths=collectFunctionPaths(issue);
+    if(fnPaths.length)errors.push('issue: executable values at '+fnPaths.join(', '));
+    return makeValidationResult(errors.length===0,errors,warnings,at);
+  }
+
   return{
     CONTRACT_VERSION:CONTRACT_VERSION,STATUS:STATUS,STATUS_LIST:STATUS_LIST,CHANGE_TYPES:CHANGE_TYPES,
     makeEntityRef:makeEntityRef,makeEvidence:makeEvidence,makeStateChange:makeStateChange,
+    severityFromPriority:severityFromPriority,makeConsistencyIssue:makeConsistencyIssue,
+    makeActionProposal:makeActionProposal,validateConsistencyIssue:validateConsistencyIssue,
     makeChangeSet:makeChangeSet,makeValidationResult:makeValidationResult,
     makeChangeSetId:makeChangeSetId,makeChangeId:makeChangeId,makeAnalysisId:makeAnalysisId,
     validateEvidence:validateEvidence,validateEvidenceList:validateEvidenceList,
@@ -2542,6 +3440,9 @@ var ChangeSetRuntime=(function(){
     changeSet.status=S.VERIFIED;
     StoryStore.appendChangeLedger({
       changeSetId:changeSet.changeSetId,source:changeSet.source,operation:changeSet.operation,
+      chapterId:changeSet.chapterId||'',ruleId:changeSet.ruleId||'',issueId:changeSet.issueId||'',
+      actionId:changeSet.actionId||'',actionType:changeSet.actionType||'',
+      changes:(changeSet.changes||[]).map(function(c){return c.path;}),
       status:S.VERIFIED,appliedAt:at,appliedCount:results.length,
       stateHashBefore:StoryStore.hash(before),stateHashAfter:StoryStore.hash(after)
     });
@@ -2562,6 +3463,150 @@ var AIExecutionLayerBridge={applyChangeSet:function(changeSet){return AIRuntime.
 AIRuntime.ChangeSetRuntime=ChangeSetRuntime;
 AIRuntime.StoryContract=StoryContract;
 AIRuntime.StoryPolicy=StoryPolicy;
+
+// ===== Phase 5.3: Action -> StateChange migration (ActionProposal -> ChangeSet；永不直写 StoryState) =====
+var ActionMigration=(function(){
+  var MIGRATED_STATE_ACTIONS=['introduce_conflict','resolve_foreshadow','create_protagonist','designate_protagonist','introduce_sidekick'];
+  var DIAGNOSIS_ONLY_ACTIONS=['bring_protagonist_back','increase_pace','flag_inconsistency','flag_relationship_issue',
+    'flag_timeline_conflict','flag_world_conflict','flag_power_conflict','flag_unused_character','flag_arc_stagnation',
+    'flag_weak_hook','flag_ending_hook'];
+
+  function statusFor(action){
+    if(MIGRATED_STATE_ACTIONS.indexOf(action)>=0)return'MIGRATED';
+    if(DIAGNOSIS_ONLY_ACTIONS.indexOf(action)>=0)return'MIGRATED_DIAGNOSIS_ONLY';
+    return'UNKNOWN';
+  }
+  // Runtime Migration Matrix（供文档与测试使用）
+  function matrix(){
+    var all=MIGRATED_STATE_ACTIONS.concat(DIAGNOSIS_ONLY_ACTIONS);
+    return all.map(function(action){
+      var migrated=MIGRATED_STATE_ACTIONS.indexOf(action)>=0;
+      return{
+        action:action,
+        status:migrated?'MIGRATED':'MIGRATED_DIAGNOSIS_ONLY',
+        writesState:migrated,
+        viaChangeSet:true,
+        requiresApproval:migrated,
+        verified:migrated,
+        legacyPath:false
+      };
+    });
+  }
+
+  // 伏笔回收必须携带 evidence：从"埋设章节"的真实正文切片构造（excerpt === slice）
+  function evidenceForForeshadow(fs){
+    if(!fs)return[];
+    var chapters=StoryStore.getChapters();
+    var idx=(typeof fs.chapterPlaced==='number'&&fs.chapterPlaced>=0)?fs.chapterPlaced:0;
+    var ch=chapters[idx]||chapters[chapters.length-1];
+    if(!ch)return[];
+    var text=String(ch.content||'');
+    if(!text.length)return[];
+    var marker='[[伏笔:'+fs.content+']]';
+    var at=text.indexOf(marker);
+    var len=marker.length;
+    if(at<0){at=text.indexOf(fs.content);len=String(fs.content||'').length;}
+    if(at<0||len<=0){at=0;len=Math.min(text.length,40);}
+    if(at+len>text.length)at=Math.max(0,text.length-len);
+    return[StoryContract.makeEvidence('chapter',ch.id,at,at+len,text.slice(at,at+len))];
+  }
+
+  function changesFor(decision,ctx){
+    var out=[];
+    var d=decision||{};
+    var chapterCount=(ctx&&ctx.storyState&&ctx.storyState.chapters)?ctx.storyState.chapters.length:StoryStore.getChapters().length;
+    var evidence=Array.isArray(d.evidence)?d.evidence:[];
+    switch(d.action){
+      case'introduce_conflict':{
+        // 语义幂等：已存在 suggested 冲突则不再提议（旧 _applyDecision 的重复保护迁移至此）
+        if(StoryStore.getConflicts().some(function(c){return c.status==='suggested';}))return[];
+        var cid=StoryStore.nextId('conflicts');
+        out.push({actionId:'action:introduce_conflict:add:'+cid,type:'add',
+          target:{entityType:'conflict',entityId:cid,displayName:'核心冲突'},
+          path:'conflicts.'+cid,before:null,
+          after:{id:cid,type:'person_vs_person',description:'AI建议：引入核心冲突',parties:[],status:'suggested',
+            chapterStarted:chapterCount,chapterResolved:null},
+          reason:d.reason||'引入核心冲突',evidence:evidence,confidence:d.confidence||0.8});
+        break;
+      }
+      case'resolve_foreshadow':{
+        var fid=d.target;
+        var fs=StoryStore.getForeshadow(fid);
+        if(!fs||fs.status==='resolved')return[];
+        var ev=evidence.length?evidence:evidenceForForeshadow(fs);
+        if(!ev.length)return[];   // 必须存在 evidence（Policy 同样要求）
+        out.push({actionId:'action:resolve_foreshadow:'+fid,type:'update',
+          target:{entityType:'foreshadow',entityId:fid,displayName:fs.content},
+          path:'foreshadowing.'+fid+'.status',before:fs.status,after:'resolved',
+          reason:d.reason||('回收伏笔「'+fs.content+'」'),evidence:ev,confidence:d.confidence||0.9});
+        break;
+      }
+      case'create_protagonist':{
+        var pcid=StoryStore.nextId('characters');
+        out.push({actionId:'action:create_protagonist:add:'+pcid,type:'add',
+          target:{entityType:'character',entityId:pcid,displayName:'主角'},
+          path:'characters.'+pcid,before:null,
+          after:{id:pcid,name:'主角',gender:'',age:'',charType:'protagonist',tags:[],aliases:[],fields:{},relations:[],
+            presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},
+            aiProfile:{arcStage:'',consistencyScore:100,importance:10}},
+          reason:d.reason||'创建主角',evidence:evidence,confidence:d.confidence||0.9});
+        break;
+      }
+      case'designate_protagonist':{
+        var tid=d.target;
+        var ch=StoryStore.getCharacter(tid);
+        if(!ch||ch.charType==='protagonist')return[];
+        out.push({actionId:'action:designate_protagonist:'+tid,type:'update',
+          target:{entityType:'character',entityId:tid,displayName:ch.name},
+          path:'characters.'+tid+'.charType',before:ch.charType,after:'protagonist',
+          reason:d.reason||('指定「'+ch.name+'」为主角'),evidence:evidence,confidence:d.confidence||0.85});
+        break;
+      }
+      case'introduce_sidekick':{
+        var sid=StoryStore.nextId('characters');
+        out.push({actionId:'action:introduce_sidekick:add:'+sid,type:'add',
+          target:{entityType:'character',entityId:sid,displayName:'新配角'},
+          path:'characters.'+sid,before:null,
+          after:{id:sid,name:'配角',gender:'',age:'',charType:'supporting',tags:[],aliases:[],fields:{},relations:[],
+            presence:{firstAppear:0,lastAppear:0,chapterIds:[],appearCount:0},
+            aiProfile:{arcStage:'',consistencyScore:100,importance:5}},
+          reason:d.reason||'引入配角',evidence:evidence,confidence:d.confidence||0.6});
+        break;
+      }
+      default:return[];   // 诊断类动作：不产生状态变更
+    }
+    return out;
+  }
+
+  function propose(decision,ctx,options){
+    var d=decision||{};
+    var drafts=changesFor(d,ctx||{});
+    if(!drafts.length)return null;
+    var cs=ChangeSetRuntime.propose({
+      source:'ActionMigration.'+String(d.action||'unknown'),
+      operation:'runtime_action',
+      reason:d.reason||'',
+      evidence:Array.isArray(d.evidence)?d.evidence:[],
+      changes:drafts,
+      baseStateHash:StoryStore.hash(StoryStore.state)
+    },options||{});
+    cs.ruleId=d.ruleId||'';
+    cs.issueId=d.issueId||'';
+    cs.actionId=d.actionId||'';
+    cs.actionType=d.action||'';
+    cs.policy=StoryPolicy.evaluateChangeSet(cs);
+    return cs;
+  }
+
+  return{
+    MIGRATED_STATE_ACTIONS:MIGRATED_STATE_ACTIONS,
+    DIAGNOSIS_ONLY_ACTIONS:DIAGNOSIS_ONLY_ACTIONS,
+    statusFor:statusFor,matrix:matrix,propose:propose,changesFor:changesFor,
+    evidenceForForeshadow:evidenceForForeshadow
+  };
+})();
+
+AIRuntime.ActionMigration=ActionMigration;
 
 // ===== UI Layer =====
 var curPage='dashboard';var curChId=null;var curView='list';
@@ -2666,66 +3711,144 @@ function toggleRule(id){var on=AIRuntime.RuleRegistry.toggleRule(id);rDataC(docu
 function setTheme(t){StoryStore.setMeta('theme',t);document.documentElement.setAttribute('data-theme',t==='dark'?'':t);}
 function setFontSize(s){StoryStore.setMeta('fontSize',parseInt(s));document.body.style.fontSize=s+'px';rSettings(document.getElementById('page-settings'));}
 
+// ===== Phase 5.3: UI result contract（"已执行" 只在真实验证通过时出现）=====
+function applyResultMessage(res){
+  if(!res)return'执行失败：无结果';
+  var v=res.verified||{};
+  if(res.ok&&v.hasChanges)return'已执行：'+v.executedCount+' 个动作 / '+v.changeCount+' 处状态变更';
+  if(res.ok&&!v.hasChanges)return'状态未变化（未产生已验证的变更）';
+  var failed=(res.results||[]).filter(function(r){return r.status==='failed'||r.status==='invalid'||r.status==='refused';});
+  if(failed.length)return'执行失败：'+failed.map(function(r){return r.detail;}).join('；');
+  if(v.success===false)return'验证失败：存在未应用的变更';
+  return'未执行';
+}
+
 function runAIRuntime(){
-  var result=AIRuntime.run(StoryStore.getChapters().length-1>=0?StoryStore.getChapters().length-1:0);
-  var el=document.getElementById('aiRuntimeResult');if(!el)return;
-  el.innerHTML='<div class="card"><p class="text-sm">发现问题: '+result.analysis.issues.length+'</p><p class="text-sm">决策数: '+result.analysis.decisions.length+'</p><p class="text-sm">执行: '+result.executed.length+'</p><p class="text-sm">快照哈希: '+result.snapshotHash+'</p></div>';
-  toast('AI分析完成','success');
+  var idx=StoryStore.getChapters().length-1>=0?StoryStore.getChapters().length-1:0;
+  var result=AIRuntime.run(idx);
+  var v=result.verified||{};
+  var msg=applyResultMessage({ok:true,verified:v,results:result.executed});
+  var el=document.getElementById('aiRuntimeResult');
+  if(el){
+    el.innerHTML='<div class="card"><p class="text-sm">发现问题: '+result.analysis.issues.length+'</p>'+
+      '<p class="text-sm">决策数: '+result.analysis.decisions.length+'</p>'+
+      '<p class="text-sm">执行: '+(v.executedCount||0)+' 个动作 / '+(v.changeCount||0)+' 处状态变更</p>'+
+      '<p class="text-sm">'+msg+'</p>'+
+      '<p class="text-muted text-sm">变更集: '+((result.changeSetIds||[]).join(', ')||'无')+'</p></div>';
+  }
+  toast(msg,v.hasChanges?'success':'info');
+  return result;
+}
+
+function renderIssueCard(issue,plan){
+  var ev=(issue.evidence||[]).map(function(e){return e&&e.excerpt?('「'+e.excerpt+'」@'+e.sourceId):'';}).filter(Boolean).join(' ');
+  var ref=issue.entityRef?('<span class="badge badge-info">'+issue.entityRef.entityType+':'+issue.entityRef.entityId+'</span>'):'';
+  var loc=issue.location?('<span class="text-muted text-sm">'+(issue.location.chapterId||'-')+'</span>'):'';
+  var sevBadge=(issue.severity==='blocking'||issue.severity==='error')?'danger':(issue.severity==='warning'?'warning':'info');
+  var actions;
+  if(plan&&!plan.diagnosisOnly){
+    actions='<div class="action-actions"><button class="btn btn-sm btn-primary" onclick="approveAction(\''+plan.id+'\')">采用</button>'+
+      '<button class="btn btn-sm" onclick="rejectAction(\''+plan.id+'\')">忽略</button></div>';
+  }else{
+    actions='<div class="badge badge-info">诊断（不修改状态）</div>';
+  }
+  return '<div class="action-card severity-'+issue.severity+'"><div class="action-header">'+
+    '<span class="action-title">'+issue.ruleId+' · '+issue.title+'</span>'+
+    '<span class="badge badge-'+sevBadge+'">'+issue.severity+'</span>'+ref+loc+'</div>'+
+    '<div class="action-desc">'+issue.message+'</div>'+
+    (ev?('<div class="action-desc text-muted">证据: '+ev+'</div>'):'')+
+    (issue.suggestedFix?('<div class="action-desc">建议: '+issue.suggestedFix+'</div>'):'')+
+    actions+'</div>';
+}
+
+function renderPlans(){
+  var plans=(_lastActionPlans||[]);
+  var actionsEl=document.getElementById('copilotActions');
+  if(!actionsEl)return;
+  if(!plans.length){actionsEl.innerHTML='<p class="text-muted text-sm">无建议动作</p>';return;}
+  actionsEl.innerHTML=plans.map(function(p){
+    var issue=p.issue||{ruleId:p.ruleId,title:p.ruleId,message:p.reason,severity:(p.priority>=9?'blocking':p.priority>=7?'error':p.priority>=5?'warning':'info'),evidence:p.evidence||[],entityRef:null,location:null,suggestedFix:p.suggestedFix||p.reason};
+    var card=renderIssueCard(issue,p);
+    if(p.status==='rejected')card=card.replace(/<div class="action-actions">[\s\S]*?<\/div>/,'<div class="badge badge-info">已拒绝（REJECTED 已记录）</div>');
+    if(p.status==='applied'&&p.executionResult)card=card.replace(/<div class="action-actions">[\s\S]*?<\/div>/,'<div class="badge badge-success">'+p.executionResult.message+'</div>');
+    return card;
+  }).join('');
 }
 
 function runCopilot(){
-  if(!curChId)return;
-  var ch=StoryStore.getChapter(curChId);if(!ch)return;
+  if(!curChId)return null;
+  var ch=StoryStore.getChapter(curChId);if(!ch)return null;
   var idx=StoryStore.getChapters().indexOf(ch);
   var result=AIRuntime.runActionPlan(idx);
-  _lastActionPlans=result.plans;
-  // Render issues
-  var issuesEl=document.getElementById('copilotIssues');if(issuesEl){
-    if(result.analysis.issues.length===0){issuesEl.innerHTML='<p class="text-muted text-sm">未发现问题</p>';}
-    else{issuesEl.innerHTML=result.analysis.issues.map(function(i){return'<div class="action-card severity-'+(i.severity==='critical'?'critical':i.severity==='warning'?'warning':'info')+'"><div class="action-header"><span class="action-title">'+i.type+'</span><span class="badge badge-'+(i.severity==='critical'?'danger':i.severity==='warning'?'warning':'info')+'">'+i.severity+'</span></div><div class="action-desc">'+i.reason+'</div></div>';}).join('');}
+  _lastActionPlans=result.plans||[];
+  var issuesEl=document.getElementById('copilotIssues');
+  if(issuesEl){
+    var issues=(result.analysis&&result.analysis.issues)||[];
+    issuesEl.innerHTML=issues.length?issues.map(function(i){return renderIssueCard(i,null);}).join(''):'<p class="text-muted text-sm">未发现问题</p>';
   }
-  // Render action plans
-  var actionsEl=document.getElementById('copilotActions');if(actionsEl){
-    if(result.plans.length===0){actionsEl.innerHTML='<p class="text-muted text-sm">无建议动作</p>';}
-    else{actionsEl.innerHTML=result.plans.map(function(p){var sev=p.priority>=8?'critical':p.priority>=5?'warning':'info';return'<div class="action-card severity-'+sev+'"><div class="action-header"><span class="action-title">'+p.action+'</span><span class="badge badge-'+(p.priority>=8?'danger':p.priority>=5?'warning':'info')+'">P'+p.priority+'</span></div><div class="action-desc">'+p.reason+'</div>'+(p.requiresApproval?'<div class="action-actions"><button class="btn btn-sm btn-primary" onclick="approveAction(\''+p.id+'\')">采用</button><button class="btn btn-sm" onclick="rejectAction(\''+p.id+'\')">忽略</button></div>':'<div class="badge badge-info">诊断</div>')+'</div>';}).join('');}
-  }
+  renderPlans();
+  return result;
 }
 
 function approveAction(planId){
-  var plan=_lastActionPlans.find(function(p){return p.id===planId;});if(!plan)return;
-  var result=AIRuntime.ActionPlan.executeWithApproval([plan],[planId]);
-  toast('已执行: '+plan.action,'success');
-  runCopilot();
+  var plan=(_lastActionPlans||[]).filter(function(p){return p.id===planId;})[0];
+  if(!plan)return{ok:false,status:'NOT_FOUND',errors:['plan not found: '+planId]};
+  var res=AIRuntime.applyPlan(plan);
+  var msg=applyResultMessage(res);
+  toast(msg,res.ok?'success':'error');
+  plan.executionResult={ok:res.ok,status:res.status,verified:res.verified,message:msg};
+  plan.status=res.ok?'applied':'failed';
+  renderPlans();
+  return res;
 }
+
 function rejectAction(planId){
-  _lastActionPlans=_lastActionPlans.filter(function(p){return p.id!==planId;});
-  toast('已忽略','info');
-  var actionsEl=document.getElementById('copilotActions');if(actionsEl){
-    actionsEl.innerHTML=_lastActionPlans.map(function(p){var sev=p.priority>=8?'critical':p.priority>=5?'warning':'info';return'<div class="action-card severity-'+sev+'"><div class="action-header"><span class="action-title">'+p.action+'</span></div><div class="action-desc">'+p.reason+'</div></div>';}).join('')||'<p class="text-muted text-sm">无建议动作</p>';
-  }
+  var plan=(_lastActionPlans||[]).filter(function(p){return p.id===planId;})[0];
+  if(!plan)return{ok:false,status:'NOT_FOUND',errors:['plan not found: '+planId]};
+  var res=AIRuntime.rejectPlan(plan,'作者忽略');
+  plan.status='rejected';
+  plan.rejected={reason:'作者忽略',at:Date.now()};
+  toast('已拒绝（REJECTED 已写入审计）','info');
+  renderPlans();
+  return res;
 }
 
 function runConsistencyCheck(){
-  var s=StoryStore.state;
-  var ctx=buildAIContext(Math.max(0,s.chapters.length-1));
-  var result=AIDecisionLayer.evaluate(ctx);
-  var el=document.getElementById('consistencyResults');if(!el)return;
-  var dims=[
-    {icon:'⏰',name:'时间线一致性',rule:'timeline_conflict',desc:'检查故事时间线是否有矛盾'},
-    {icon:'👤',name:'人物年龄/能力',rule:'power_level_conflict',desc:'检查人物能力是否超出当前境界'},
-    {icon:'🔗',name:'人物关系',rule:'relationship_inconsistency',desc:'检查人物关系是否有矛盾'},
-    {icon:'⚙️',name:'世界观规则',rule:'world_rule_conflict',desc:'检查世界观设定是否有矛盾'},
-    {icon:'📌',name:'伏笔遗漏',rule:'foreshadow_overdue',desc:'检查是否有未回收的伏笔'},
-    {icon:'📊',name:'角色一致性',rule:'character_inconsistency',desc:'检查角色行为是否一致'},
-    {icon:'🚶',name:'闲置角色',rule:'unused_character',desc:'检查是否有未出场的角色'},
-    {icon:'📈',name:'弧光停滞',rule:'arc_stagnation',desc:'检查主角成长弧光是否停滞'}
-  ];
-  el.innerHTML='<div class="card">'+dims.map(function(d){
-    var issue=result.issues.find(function(i){return i.type===d.rule;});
-    var pass=!issue;
-    return'<div class="consistency-item"><span class="consistency-icon">'+d.icon+'</span><div class="consistency-content"><div class="consistency-name">'+d.name+(pass?' <span class="badge badge-success">通过</span>':' <span class="badge badge-danger">问题</span>')+'</div><div class="consistency-desc">'+(pass?d.desc:issue.reason)+'</div></div></div>';
-  }).join('')+'</div><div class="card"><div class="card-title">检查摘要</div><p class="text-sm">通过: '+dims.filter(function(d){return!result.issues.find(function(i){return i.type===d.rule;});}).length+'/'+dims.length+'</p><p class="text-sm">问题: '+result.issues.length+'</p><p class="text-sm">建议: '+result.decisions.length+'</p><p class="text-muted text-sm mt-1">检查基于真实 StoryState 数据和规则系统，无随机模拟。</p></div>';
-  toast('一致性检查完成','success');
+  var report=AIRuntime.consistencyReport();
+  var el=document.getElementById('consistencyResults');
+  if(el){
+    var dims=[
+      {icon:'⏰',name:'时间线一致性',rules:['timeline_conflict'],desc:'检查故事时间线是否有矛盾'},
+      {icon:'👤',name:'人物年龄/能力',rules:['power_level_conflict'],desc:'检查人物能力是否超出当前进度上限'},
+      {icon:'🔗',name:'人物关系',rules:['relationship_inconsistency'],desc:'检查人物关系是否有矛盾'},
+      {icon:'⚙️',name:'世界观规则',rules:['world_rule_conflict'],desc:'检查世界观设定是否有矛盾'},
+      {icon:'📌',name:'伏笔遗漏',rules:['foreshadow_overdue'],desc:'检查是否有未回收的伏笔'},
+      {icon:'📊',name:'角色一致性',rules:['character_inconsistency'],desc:'检查角色一致性评分（确定性）'},
+      {icon:'🚶',name:'闲置角色',rules:['unused_character'],desc:'检查是否有未出场的角色'},
+      {icon:'📈',name:'弧光停滞',rules:['arc_stagnation'],desc:'检查主角成长弧光是否停滞'}
+    ];
+    var byRule={};
+    (report.issues||[]).forEach(function(i){byRule[i.ruleId]=i;});
+    var summary='<div class="card"><div class="card-title">一致性评分（确定性）</div>'+
+      '<p class="text-sm">评分: '+report.score.score+'/100</p>'+
+      '<p class="text-sm">blocking: '+report.blockingIssues+' · error: '+report.errors+' · warning: '+report.warnings+' · info: '+report.infos+'</p>'+
+      '<p class="text-muted text-sm mt-1">评分由 Issues 派生，Issues 才是事实来源；同一 StoryState 必然得到同一评分。</p></div>';
+    var dimHtml='<div class="card">'+dims.map(function(d){
+      var issue=null;
+      d.rules.forEach(function(r){if(byRule[r])issue=byRule[r];});
+      var pass=!issue;
+      return '<div class="consistency-item"><span class="consistency-icon">'+d.icon+'</span><div class="consistency-content">'+
+        '<div class="consistency-name">'+d.name+(pass?' <span class="badge badge-success">通过</span>':' <span class="badge badge-danger">问题</span>')+'</div>'+
+        '<div class="consistency-desc">'+(pass?d.desc:issue.message)+'</div></div></div>';
+    }).join('')+'</div>';
+    var plansByIssue={};
+    (report.plans||[]).forEach(function(p){if(p.issueId)plansByIssue[p.issueId]=p;});
+    var issueHtml='<div class="card"><div class="card-title">问题、证据与建议</div>'+
+      ((report.issues||[]).length?report.issues.map(function(i){return renderIssueCard(i,plansByIssue[i.issueId]);}).join(''):'<p class="text-muted text-sm">未发现问题</p>')+'</div>';
+    el.innerHTML=summary+dimHtml+issueHtml;
+  }
+  toast('一致性检查完成: '+report.score.score+'/100',report.blockingIssues?'error':'success');
+  return report;
 }
 
 function runRegressionTests(){
@@ -2760,7 +3883,7 @@ function saveWB(){var name=document.getElementById('m-wb-name').value.trim();if(
 
 function showModal(title,content){var c=document.getElementById('modalContainer');c.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><div class="modal-header"><span class="modal-title">'+title+'</span><button class="modal-close" onclick="closeModal()">×</button></div>'+content+'</div></div>';}
 function closeModal(){document.getElementById('modalContainer').innerHTML='';}
-function toast(msg,type){var c=document.getElementById('toastContainer');var t=document.createElement('div');t.className='toast toast-'+(type||'info');t.textContent=msg;c.appendChild(t);setTimeout(function(){t.remove();},3000);}
+function toast(msg,type){var c=document.getElementById('toastContainer');var t=document.createElement('div');t.className='toast toast-'+(type||'info');t.textContent=msg;if(c&&c.appendChild)c.appendChild(t);setTimeout(function(){if(t&&typeof t.remove==='function')t.remove();},3000);}
 
 function exportData(){var data=StoryStore.exportJSON();var blob=new Blob([data],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='novel-data.json';a.click();toast('已导出','success');}
 function importData(input){var file=input.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(e){var res;try{res=StoryStore.importJSON(e.target.result);}catch(err){res={ok:false,errors:[String((err&&err.message)||err)]};}if(res&&res.ok){navigate(curPage);toast('已导入','success');}else{toast('导入失败：'+((res&&res.errors&&res.errors[0])||'数据不合法'),'error');}};reader.readAsText(file);}
