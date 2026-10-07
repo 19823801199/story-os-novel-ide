@@ -1,7 +1,7 @@
 # Story OS Novel IDE
 
 **版本**: v0.2.0
-**阶段**: Phase 5.1 - State Contract & Auditable Change（基线 Phase 4 全部保留）
+**阶段**: Phase 5.2 - Chapter Analysis & Controlled Runtime Migration（基线 Phase 4 / 5.1 全部保留）
 **定位**: AI 驱动的小说创作与叙事状态管理 IDE
 
 ## 核心架构
@@ -13,9 +13,11 @@ StoryStore (数据访问层 + Schema: normalize / migrate / validate / structure
     ↓
 StoryState (唯一事实来源，含审计账本 narrative_state.changeLedger)
     ↓
-ChangeSet Runtime (Proposed → Validating → Valid → Approved → Applied → Verified)
+StoryEngine (内容解析引擎；解析与写入已分离)
     ↓
-StoryEngine (内容解析引擎；已分离"解析"与"写入")
+ChapterAnalysis (analyzeChapter / Evidence / Entity Resolution / diffAnalysis)
+    ↓
+ChangeSet Runtime (Proposed → Validating → Valid → Approved → Applied → Verified)
     ↓
 AIRuntime (规则决策引擎)
     ↓
@@ -34,7 +36,7 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **幂等执行** - 决策 hash 去重，防止重复执行
 - **一致性检查** - 基于真实 StoryState + 规则系统，无随机模拟
 - **数据持久化** - localStorage 自动保存 + 旧版本数据迁移
-- **Regression Test** - 34 项自动化回归测试（Phase 4 的 10 项全部保留）
+- **Regression Test** - 69 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项全部保留）
 - **Copilot 面板** - 章节编辑器右侧实时展示 AI 诊断与可执行动作
 
 ### Phase 5.1 新增
@@ -51,6 +53,18 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **解析与写入分离** - `StoryEngine.proposeChapterChanges()` 只产出 ChangeSet，不写状态
 - **AIRuntime.applyChangeSet()** - 经 ExecutionLayer → StoryStore 的受控写路径
 - **文档** - `docs/phase5-runtime-contract.md`
+
+### Phase 5.2 新增
+
+- **ChapterAnalysis** - `StoryEngine.analyzeChapter(chapterId)`：章节 → 结构化事实（含 confidence / entityRef / evidence / reason），**只读**
+- **sourceHash** - 由正文确定性生成；同内容同哈希、改正文即变化；参与 ChangeSet 身份派生
+- **Evidence 绑定正文** - `start/end/excerpt` 必须来自真实文本切片，`StoryContract.validateEvidence()` 校验，非法即拒绝
+- **Entity Resolution** - exact → alias → 称谓归一化 → candidate → unresolved；候选不自动选择、未解析不自动建人
+- **ChapterAnalysisDiff** - `StoryEngine.diffAnalysis()`：entity / relation / event / foreshadowing / timeline / emotion 的 add / remove / update
+- **Chapter ChangeSet** - `proposeChapterChanges(chapterId)` 产出带 chapterId / sourceHash / policy / evidence 的 ChangeSet(PROPOSED)
+- **StoryPolicy** - 纯策略判定（低置信度新角色禁止自动执行；核心身份 / 删除 / 时间线 / 世界观 / 伏笔 / 关系需批准；伏笔必须有 evidence）
+- **Controlled Runtime** - `syncFromChapter()` 改造为兼容适配器，经 analyze → propose → validate → approve → apply → verify
+- **文档** - `docs/phase5.2-chapter-analysis.md`
 
 ## 未完成
 
@@ -77,7 +91,8 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 ├── tests/
 │   └── regression-tests.js # 回归测试
 ├── docs/                    # 文档目录
-│   └── phase5-runtime-contract.md   # Phase 5.1 状态契约与可审计变更
+│   ├── phase5-runtime-contract.md   # Phase 5.1 状态契约与可审计变更
+│   └── phase5.2-chapter-analysis.md # Phase 5.2 章节分析与受控运行时迁移
 ├── backup/                 # 原始备份（不提交 Git）
 │   └── phase-4-complete-original/
 ├── README.md
@@ -104,8 +119,9 @@ node tests/regression-tests.js
 | SCHEMA_VERSION | 2 |
 | CONTRACT_VERSION | 5.1 |
 | Rules | 16 |
-| Regression Tests | 34/34 PASS |
-| 真实 LLM | 未接入（Phase 5.1 不含 Provider） |
+| Regression Tests | 69/69 PASS |
+| ChapterAnalysis | Phase 5.2（确定性解析，无 LLM） |
+| 真实 LLM | 未接入（Phase 5.1 / 5.2 均不含 Provider） |
 
 ## License
 

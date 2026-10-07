@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.2.0 - Phase 5.2 (Chapter Analysis & Controlled Runtime Migration)
+
+### Added
+
+- `StoryEngine.analyzeChapter(chapterId)`：ChapterAnalysis 契约（analysisId / chapterId / sourceHash / analyzedAt / characters / locations / events / relationships / foreshadowing / timeline / emotions / rawFacts / diagnostics）
+- 结构化 Fact：`{ value, operation, confidence, entityRef, evidence, reason, resolution, matchedBy, occurrences }`
+- `sourceHash`：由章节正文确定性生成（同内容一致、改正文即变化）
+- Evidence 真正绑定正文：`excerpt === source.slice(start,end)`；新增 `StoryContract.validateEvidence()` / `validateEvidenceList()`；一个实体可携带多条 Evidence
+- `normalizeCharacterName()` + `StoryEngine.resolveEntity()`：exact → alias → 称谓归一化 → candidate → unresolved
+- `StoryEngine.diffAnalysis()`：ChapterAnalysisDiff（entity / relation / event / foreshadowing / timeline / emotion）
+- `StoryEngine.analysisDiffToStateChanges()`：Diff → StateChange
+- `StoryEngine.proposeChapterChanges(chapterId)`：章节 ChangeSet（带 chapterId / sourceHash / reason / evidence / policy）
+- `StoryPolicy`：纯策略判定 `{ allowed, requiresApproval, reason }`
+- `StoryStore.valueAtPathIn(state, path)`：纯路径读取（verify 与前置条件共用规范化视图）
+- 回归测试由 34 项扩展到 69 项（Phase 4 / 5.1 的测试全部保留）
+
+### Changed
+
+- `StoryEngine.syncFromChapter()` 改造为**兼容适配器**（代码中标记 `COMPATIBILITY LEGACY PATH`）：analyzeChapter → ChangeSet(PROPOSED) → validate → auto-approve(`compat:syncFromChapter`) → apply → verify
+- `StoryStore.applyChange()` 支持单例路径 `narrative_state.<field>`（出场统计映射不再绕过 ChangeSet）
+- `ChangeSet` 契约扩展：`chapterId` / `sourceHash` / `reason` / `evidence` / `policy` / `analysis`
+- `StateChange` 契约扩展：`confidence` / `requiresApproval` / `policyReason`
+- `ChangeSetRuntime.verify()` 支持对象/数组值路径：以子路径变化 + 快照值比对核验整对象写入
+- `makeChangeSetId()` 引入 scope（chapterId + sourceHash）：同章节同正文幂等、改正文即新 ChangeSet
+- `StoryStore.normalize()` 保留 `characters[].aliases`（实体解析需要）
+- 测试中的状态基线统一使用 `StoryStore.hash(StoryStore.snapshot())`（与 snapshot/rollback 的规范化视图一致）
+
+### Fixed
+
+- **Phase 5.1 遗留缺陷**：`structuredDiff` 比较键集不对称的对象时 `JSON.stringify(undefined)` 返回 undefined，导致 `hashString` 抛 "Cannot read properties of undefined (reading 'length')"；现已 null-safe
+- **Phase 5.1 遗留缺陷**：ChangeSet 的 `before` 取自未规范化的活状态，而 verify 使用规范化快照，导致合法写入被回滚（"before value mismatch"）；现统一到规范化视图（propose 与前置条件检查同时修正）
+- **Phase 5.2 缺陷**：`ChangeSetRuntime.propose()` 构造 shape 时丢失 `confidence` / `requiresApproval` / `policyReason`，策略结论无法传到 StateChange；已透传
+
+### Notes
+
+- **当前没有真实 LLM**：不引入任何模型调用、网络层或 Provider 实现；解析仍是确定性关键词/正则
+- 剩余 `COMPATIBILITY LEGACY PATH` 写入：`_lastParseResult`（解析缓存，经 StoryStore.setLastParseResult）；Phase 4 的 16 个 Runtime Action 仍经 `AIExecutionLayer._applyDecision` 直接改状态（Phase 5.3 收口）
+- 章节链路（analyzeChapter / proposeChapterChanges）均不修改 StoryState，有测试断言
+- 未改动 `APP_VERSION` / `STORY_STATE_VERSION` / `SCHEMA_VERSION`
+
 ## v0.2.0 - Phase 5.1 (State Contract & Auditable Change)
 
 ### Added
