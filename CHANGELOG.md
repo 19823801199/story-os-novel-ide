@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.2.0 - Phase 5.4 (AI Provider Contract & Safe LLM Integration)
+
+> 本阶段是第一个真实 LLM 可以进入系统的阶段。核心写入架构未改动：模型只能产生结构化建议。
+
+### Added
+
+- `ProviderErrors` / `makeProviderError`：10 类可识别错误（CONFIG / AUTH / NETWORK / TIMEOUT / RATE_LIMIT / INVALID_RESPONSE / SCHEMA / PROVIDER / BUDGET_EXCEEDED / UNKNOWN）+ `retryable` 标记
+- `AIProviderContract.validate()`：`complete` 必需、`stream` 可选
+- `makeProviderResult()` / `validateProviderResult()` / `PROVIDER_RESULT_FIELDS`：ProviderResult 契约（`output` 只能是数据，拒绝可执行值）
+- `estimateTokens()` / `checkTokenBudget()`：token 粗估与 `maxInputTokens` / `maxOutputTokens` 预算
+- `MockAIProvider`：离线、无 Key、无网络、确定性，支持 9 种场景与 `stream()`
+- `OpenAICompatibleProvider` / `OllamaProvider` / `defaultProviderTransport`：真实 HTTP 实现，transport 可注入
+- `classifyTransportThrow()` / `classifyHttpResponse()`：传输与 HTTP 状态映射
+- `ProviderRegistry`：`mock` / `openai-compatible` / `ollama` 工厂（未注册类型返回 null）
+- `ProviderSettings`：独立 localStorage 配置键 `novelcraft_provider_config_v1` + 掩码视图
+- `ProviderRuntime.complete / stream / resolve / config / auditFields`
+- `ChapterExtractionSchema` / `normalizeChapterExtraction()`：结构化输出契约与规范化
+- `revalidateEvidence()`：Evidence 重新验证（系统重新 slice，编造/越界/sourceId 不符一律拒绝）
+- `LLMProposalBridge.toStateChanges / propose`：抽取 → StateChange（`before` 由系统生成）→ ChangeSet
+- `LLMChapterAnalysis.analyzeChapter / applyApproved`：降级链与人工批准应用
+- 设置页 Provider 配置与 Copilot「LLM 分析」闭环（`providerSettingsHTML` / `runLLMAnalysis` / `approveLLMAnalysis` / `rejectLLMAnalysis` / `llmStatusHTML`）
+- 回归测试由 104 项扩展到 147 项（Phase 4 / 5.1 / 5.2 / 5.3 的测试全部保留）
+
+### Changed
+
+- `ChangeSetRuntime.approve()`：新增人工审批硬门 —— `requiresHumanApproval` 的 ChangeSet 拒绝 `system` / `system:*` / `compat:*` / `auto` / 空批准人，返回 `human_approval_required`
+- 审计账本条目新增 `origin` 与 `llm:{ provider, model, requestId, promptHash, usage, latencyMs }`
+- `LLMProposalBridge` 的 `before` 改为从**规范化快照**读取（与前置条件/verify 同一视图）
+
+### Fixed
+
+- **Phase 5.4 早期缺陷**：LLM 提案的 `before` 取自未规范化的活状态，导致 aiAnalysis 更新的前置条件不匹配、批准后写入失败；现统一到规范化视图
+- Provider 区块使用 `StoryStore.hash` 生成 requestId 会破坏"Provider 与 Runtime 隔离"，改为纯本地字符串哈希
+
+### Notes
+
+- **真实 LLM 未做 smoke test**（无 API Key / 未配置第三方服务）：`REAL LLM CONTRACT IMPLEMENTED, SMOKE TEST NOT RUN`
+- 自动回归测试**不触网**：所有 Provider 测试使用 `MockAIProvider` 或注入的同步假 transport
+- API Key 不进入 StoryState / export / ChangeSet / changeLedger；账本只记录 provider / model / requestId / promptHash / usage / latency
+- 确定性解析器（关键词/正则）保留为基线，LLM 失败一律降级
+- 未改动 `APP_VERSION` / `STORY_STATE_VERSION` / `SCHEMA_VERSION`
+
+
 ## v0.2.0 - Phase 5.3 (Runtime Action Migration & Explainable Consistency)
 
 ### Added

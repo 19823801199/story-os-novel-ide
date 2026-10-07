@@ -3017,7 +3017,468 @@ var AIRuntime=(function(){
       });
       t(104,'Action 迁移后不再写 aiSuggestions',noSuggestions);
 
+      // ===== Phase 5.4 tests (105-147): AI Provider Contract & Safe LLM Integration =====
+      function p54Chapter(content,aiAnalysis){
+        return{id:'chapter_001',title:'第一章',content:content,wordCount:String(content||'').length,status:'已完成',order:0,
+          aiAnalysis:aiAnalysis||{characters:[],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}};
+      }
+      function p54Fixture(content,aiAnalysis,extraChars){
+        return p53Fixture({chapters:[p54Chapter(content===undefined?'林默走进客栈。':content,aiAnalysis)],
+          characters:extraChars||[]});
+      }
+      function p54Cfg(over){
+        var c=ProviderSettings.defaults();
+        c.enabled=true;c.provider='mock';c.model='mock-model-v1';
+        if(over)Object.keys(over).forEach(function(k){c[k]=over[k];});
+        return c;
+      }
+      function p54Options(scenario,over){
+        return{provider:MockAIProvider({scenario:scenario||'success'}),config:p54Cfg(over)};
+      }
+      function p54FakeTransport(payload,status){
+        var captured=null;
+        var t=function(url,init){captured={url:url,init:init};return{ok:(status||200)<400,status:(status||200),text:JSON.stringify(payload)};};
+        t.captured=function(){return captured;};
+        return t;
+      }
+      function p54Envelope(content){
+        return{choices:[{message:{content:JSON.stringify(content)}}],usage:{prompt_tokens:11,completion_tokens:22,total_tokens:33}};
+      }
+
+      // --- 105-120: Provider contract / ProviderResult / MockProvider / schema ---
+      var providerContract=(function(){
+        var m=MockAIProvider();
+        var ok=AIProviderContract.validate(m);
+        var bad=AIProviderContract.validate({});
+        var badStream=AIProviderContract.validate({provider:'x',complete:function(){},stream:'nope'});
+        return ok.valid&&AIProviderContract.REQUIRED_METHODS.indexOf('complete')>=0&&
+          typeof m.complete==='function'&&typeof m.stream==='function'&&m.offline===true&&m.requiresApiKey===false&&
+          !bad.valid&&bad.errors.length>=2&&!badStream.valid;
+      })();
+      t(105,'Provider contract（complete/stream + 校验）',providerContract);
+
+      var providerResultContract=(function(){
+        var r=makeProviderResult({provider:'mock',model:'m',requestId:'r1',success:true,output:'{}',structured:{},usage:{inputTokens:1,outputTokens:2,totalTokens:3},latencyMs:5,error:null,rawResponse:'{}'});
+        var v=validateProviderResult(r);
+        var noError=validateProviderResult(makeProviderResult({success:false,output:null}));
+        var exec=validateProviderResult(makeProviderResult({success:true,output:{fn:function(){}}}));
+        var fieldsOk=PROVIDER_RESULT_FIELDS.every(function(k){return k in r;});
+        return fieldsOk&&v.valid&&r.usage.totalTokens===3&&r.latencyMs===5&&!noError.valid&&!exec.valid&&
+          exec.errors.join(',').indexOf('executable')>=0;
+      })();
+      t(106,'ProviderResult contract（10 字段 / output 只能是数据）',providerResultContract);
+
+      var mockSuccess=(function(){
+        var m=MockAIProvider();
+        var a=m.complete({input:'林默走进客栈。',chapterId:'chapter_001'},{});
+        var b=m.complete({input:'林默走进客栈。',chapterId:'chapter_001'},{});
+        return a.success&&b.success&&validateProviderResult(a).valid&&
+          StoryStore.hash(a.structured)===StoryStore.hash(b.structured)&&a.requestId===b.requestId&&
+          a.structured.characters.length===1&&m.deterministic===true;
+      })();
+      t(107,'MockProvider success（确定性输出）',mockSuccess);
+
+      var errScenarios=[
+        ['timeout','TIMEOUT'],['network_error','NETWORK_ERROR'],['auth_error','AUTH_ERROR'],
+        ['rate_limit','RATE_LIMIT'],['provider_error','PROVIDER_ERROR'],['empty','INVALID_RESPONSE']
+      ];
+      var mockErrors=errScenarios.every(function(pair){
+        var r=MockAIProvider({scenario:pair[0]}).complete({input:'林默',chapterId:'chapter_001'},{});
+        return r.success===false&&r.error&&r.error.code===pair[1]&&validateProviderResult(r).valid;
+      });
+      t(108,'MockProvider 错误场景（timeout/network/auth/rate_limit/provider/empty）',mockErrors);
+
+      var mockTimeoutRetryable=MockAIProvider({scenario:'timeout'}).complete({input:'x'},{}).error.retryable===true;
+      t(109,'TIMEOUT 标记为可重试',mockTimeoutRetryable);
+
+      var mockMalformed=(function(){
+        var r=MockAIProvider({scenario:'malformed_json'}).complete({input:'林默',chapterId:'chapter_001'},{});
+        return !r.success&&r.error.code==='INVALID_RESPONSE'&&r.structured===null&&
+          String(r.rawResponse).indexOf('{characters:[')>=0&&r.error.message.indexOf('拒绝猜测')>=0;
+      })();
+      t(110,'malformed JSON → INVALID_RESPONSE（不猜测模型输出）',mockMalformed);
+
+      var mockSchema=(function(){
+        var r=MockAIProvider({scenario:'schema_error'}).complete({input:'林默',chapterId:'chapter_001'},{});
+        return !r.success&&r.error.code==='SCHEMA_ERROR';
+      })();
+      t(111,'schema 不合法 → SCHEMA_ERROR',mockSchema);
+
+      var mockEmpty=(function(){
+        var r=MockAIProvider({scenario:'empty'}).complete({input:'林默'},{});
+        return !r.success&&r.error.code==='INVALID_RESPONSE'&&r.rawResponse==='';
+      })();
+      t(112,'空响应 → INVALID_RESPONSE',mockEmpty);
+
+      var schemaAcceptsValid=(function(){
+        var m=MockAIProvider();
+        var text='林默走进客栈。';
+        var r=m.complete({input:text,chapterId:'chapter_001'},{schema:ChapterExtractionSchema});
+        var v=ChapterExtractionSchema.validate(r.structured);
+        var n=normalizeChapterExtraction(r.structured);
+        var allArrays=ChapterExtractionSchema.ARRAY_FIELDS.every(function(k){return Array.isArray(n[k]);});
+        return r.success&&v.valid&&allArrays&&n.characters.length===1&&n.characters[0].name.length>0;
+      })();
+      t(113,'合法结构化输出通过 schema + normalize 补齐 7 数组',schemaAcceptsValid);
+
+      var schemaRejectsBad=(function(){
+        var a=ChapterExtractionSchema.validate({characters:'nope'});
+        var b=ChapterExtractionSchema.validate({characters:[{name:123}]});
+        var c=ChapterExtractionSchema.validate({relationships:[{from:'A'}]});
+        var d=ChapterExtractionSchema.validate('plain string');
+        return !a.valid&&!b.valid&&!c.valid&&!d.valid&&a.errors.join(',').indexOf('characters')>=0;
+      })();
+      t(114,'schema 拒绝错误类型',schemaRejectsBad);
+
+      var normalizeDrops=(function(){
+        var n=normalizeChapterExtraction({characters:[{name:'林默',unknownField:1}],locations:['客栈'],events:['进入客栈'],
+          foreshadowing:['玉佩'],timeline:['第二天'],emotions:['紧张'],relationships:[{fromId:'a',toId:'b',type:'师徒'}],evil:'<script>'});
+        return !('evil' in n)&&!('unknownField' in n.characters[0])&&n.locations[0].name==='客栈'&&
+          n.events[0].event==='进入客栈'&&n.foreshadowing[0].content==='玉佩'&&n.timeline[0].time==='第二天'&&
+          n.emotions[0].emotion==='紧张'&&n.relationships[0].from==='a';
+      })();
+      t(115,'normalize 丢弃未知字段并统一结构',normalizeDrops);
+
+      var providerNoMutation=withState(p54Fixture('林默走进客栈。'),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var m=MockAIProvider();
+        m.complete({input:'林默走进客栈。',chapterId:'chapter_001'},{});
+        LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:m,config:p54Cfg()});
+        return StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(116,'Provider 不能修改 StoryState',providerNoMutation);
+
+      var providerIsolation=(function(){
+        var src=String(MockAIProvider.toString());
+        var region=src;
+        // 直接扫描 Provider 区块源码（去注释）中的禁止标识
+        var all=String(providerSettingsHTML.toString())+String(OpenAICompatibleProvider.toString())+String(MockAIProvider.toString())+String(openAICompatibleComplete.toString());
+        return region.indexOf('StoryStore')<0&&all.indexOf('ExecutionLayer')<0&&
+          OpenAICompatibleProvider.toString().indexOf('StoryStore')<0&&
+          MockAIProvider.toString().indexOf('StoryEngine')<0;
+      })();
+      t(117,'Provider 实现内不引用 StoryStore/StoryEngine/ExecutionLayer',providerIsolation);
+
+      var resultNormalization=(function(){
+        var r=makeProviderResult({success:true,output:'ok'});
+        var v=validateProviderResult(r);
+        return v.valid&&r.provider===''&&r.usage.inputTokens===null&&r.latencyMs===0&&r.error===null&&r.rawResponse===null;
+      })();
+      t(118,'ProviderResult normalization（缺省值安全）',resultNormalization);
+
+      var estimateOk=(function(){
+        var t1=estimateTokens('林默走进客栈。');
+        var t2=estimateTokens('');
+        return t1===4&&t2===0&&typeof estimateTokens(null)==='number';
+      })();
+      t(119,'token 粗估函数（不实现复杂 tokenizer）',estimateOk);
+
+      var registryOk=(function(){
+        var kinds=ProviderRegistry.kinds();
+        return kinds.indexOf('mock')>=0&&kinds.indexOf('openai-compatible')>=0&&kinds.indexOf('ollama')>=0&&
+          AIProviderContract.validate(ProviderRegistry.create({provider:'mock'})).valid&&
+          ProviderRegistry.create({provider:'unknown-provider'})===null;
+      })();
+      t(120,'ProviderRegistry（mock / openai-compatible / ollama）',registryOk);
+
+      // --- 121-131: OpenAI-compatible / 错误映射 / retry / budget / streaming / fallback ---
+      var openAIRequest=p54FakeTransport(p54Envelope({characters:[]}));
+      var openAIRes=OpenAICompatibleProvider({provider:'openai-compatible',model:'m1',baseURL:'https://api.example.com/v1/',
+        apiKey:'sk-test-key-1234',transport:openAIRequest}).complete({input:'林默'},{schema:ChapterExtractionSchema});
+      var cap=openAIRequest.captured();
+      var body=JSON.parse(cap.init.body);
+      t(121,'OpenAI-compatible 请求契约（URL/方法/头部/body）',
+        cap.url==='https://api.example.com/v1/chat/completions'&&cap.init.method==='POST'&&
+        cap.init.headers.Authorization==='Bearer sk-test-key-1234'&&body.model==='m1'&&
+        body.response_format.type==='json_object'&&Array.isArray(body.messages)&&
+        openAIRes.success&&openAIRes.usage.totalTokens===33&&
+        JSON.stringify(openAIRes).indexOf('sk-test-key-1234')<0);
+
+      var httpErrors=(function(){
+        var cases=[[401,'AUTH_ERROR'],[403,'AUTH_ERROR'],[429,'RATE_LIMIT'],[500,'PROVIDER_ERROR'],[404,'CONFIG_ERROR']];
+        return cases.every(function(c){
+          var t2=p54FakeTransport({error:'x'},c[0]);
+          var r=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:t2,maxRetries:0}).complete({input:'a'},{});
+          return r.success===false&&r.error.code===c[1];
+        });
+      })();
+      t(122,'HTTP 错误映射（401/403→AUTH，429→RATE_LIMIT，5xx→PROVIDER，404→CONFIG）',httpErrors);
+
+      var transportThrow=(function(){
+        var net=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',maxRetries:0,
+          transport:function(){throw new Error('network failure: fetch ECONNREFUSED');}}).complete({input:'a'},{});
+        var to=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',maxRetries:0,
+          transport:function(){throw new Error('request timed out');}}).complete({input:'a'},{});
+        return net.error.code==='NETWORK_ERROR'&&to.error.code==='TIMEOUT'&&to.error.retryable===true;
+      })();
+      t(123,'传输异常映射（NETWORK_ERROR / TIMEOUT）',transportThrow);
+
+      var configErrors=(function(){
+        var noBase=OpenAICompatibleProvider({model:'m',apiKey:'k',transport:function(){return{ok:true,status:200,text:'{}'};}}).complete({input:'a'},{});
+        var noKey=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',transport:function(){return{ok:true,status:200,text:'{}'};}}).complete({input:'a'},{});
+        var badBase=OpenAICompatibleProvider({baseURL:'ftp://x',model:'m',apiKey:'k',transport:function(){return{ok:true,status:200,text:'{}'};}}).complete({input:'a'},{});
+        return noBase.error.code==='CONFIG_ERROR'&&noKey.error.code==='AUTH_ERROR'&&badBase.error.code==='CONFIG_ERROR';
+      })();
+      t(124,'配置/鉴权错误（缺 baseURL / 缺 Key / 非法协议）',configErrors);
+
+      var retryWorks=(function(){
+        var calls=0;
+        var flaky=function(){calls++;return calls===1?{ok:false,status:503,text:''}:{ok:true,status:200,text:JSON.stringify(p54Envelope({characters:[]}))};};
+        var r=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:flaky,maxRetries:1}).complete({input:'a'},{maxRetries:1});
+        return r.success===true&&r.attempts===2&&calls===2;
+      })();
+      t(125,'retry：首次失败后重试成功',retryWorks);
+
+      var retryExhausted=(function(){
+        var calls=0;
+        var alwaysFail=function(){calls++;return{ok:false,status:503,text:''};};
+        var r=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:alwaysFail,maxRetries:1}).complete({input:'a'},{maxRetries:1});
+        return r.success===false&&r.error.code==='PROVIDER_ERROR'&&r.attempts===2&&calls===2;
+      })();
+      t(126,'retry：重试耗尽后返回错误（attempts 正确）',retryExhausted);
+
+      var tokenBudget=(function(){
+        var t1=p54FakeTransport(p54Envelope({characters:[]}));
+        var inBudget=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:t1,maxInputTokens:1}).complete({input:'林默走进客栈。'},{});
+        var outBudget=OpenAICompatibleProvider({baseURL:'https://x/v1',model:'m',apiKey:'k',transport:p54FakeTransport(p54Envelope({characters:[]})),maxOutputTokens:10}).complete({input:'a'},{maxTokens:999});
+        return inBudget.error.code==='BUDGET_EXCEEDED'&&outBudget.error.code==='BUDGET_EXCEEDED';
+      })();
+      t(127,'token budget（输入/输出超预算 → BUDGET_EXCEEDED）',tokenBudget);
+
+      var streamingContract=withState(p54Fixture('林默走进客栈。'),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var m=MockAIProvider();
+        var chunks=[];
+        var streamed=ProviderRuntime.stream(m,{input:'林默走进客栈。',chapterId:'chapter_001'},function(c){chunks.push(c);},{});
+        var direct=ProviderRuntime.complete(m,{input:'林默走进客栈。',chapterId:'chapter_001'},{});
+        return streamed.success&&chunks.length>=1&&streamed.chunks===chunks.length&&
+          StoryStore.hash(streamed.structured)===StoryStore.hash(direct.structured)&&
+          StoryStore.hash(StoryStore.snapshot())===h;
+      });
+      t(128,'streaming contract：chunk 组装为完整 ProviderResult（不改状态）',streamingContract);
+
+      var fallbackDisabled=withState(p54Fixture('林默走进客栈。'),function(){
+        var saved=ProviderSettings.load();
+        ProviderSettings.save({enabled:false,provider:'mock'});
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',{});
+        ProviderSettings.save(saved);
+        return r!==null&&r.source==='deterministic'&&r.fallback===true&&r.llmEnabled===false&&
+          !!r.analysis&&r.reason.indexOf('LLM disabled')>=0&&r.changeSet===null;
+      });
+      t(129,'LLM 未配置 → deterministic fallback',fallbackDisabled);
+
+      var fallbackOnFailure=withState(p54Fixture('林默走进客栈。'),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options('network_error'));
+        return r.source==='deterministic'&&r.fallback===true&&!!r.providerResult&&
+          r.providerResult.error.code==='NETWORK_ERROR'&&r.errors.length===1&&
+          StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(130,'Provider 失败 → deterministic fallback（状态不变）',fallbackOnFailure);
+
+      var fallbackOnSchema=withState(p54Fixture('林默走进客栈。'),function(){
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options('schema_error'));
+        var badProvider={provider:'bad-provider',model:'m',complete:function(){
+          return makeProviderResult({provider:'bad-provider',model:'m',requestId:'bad-1',success:true,output:'{}',
+            structured:{characters:'not-an-array'},error:null});}};
+        var r2=LLMChapterAnalysis.analyzeChapter('chapter_001',{provider:badProvider,config:p54Cfg()});
+        return r.source==='deterministic'&&r.providerResult.error.code==='SCHEMA_ERROR'&&
+          r2.source==='deterministic'&&r2.fallback===true&&r2.reason.indexOf('schema failed')>=0&&
+          r2.errors.length===1&&r2.errors[0].code==='SCHEMA_ERROR';
+      });
+      t(131,'schema 失败 → reject → deterministic fallback',fallbackOnSchema);
+
+      // --- 132-141: Evidence 重验证 / Proposal / 人工审批 / 安全 / 审计 ---
+      var evidenceRevalidated=(function(){
+        var text='林默走进客栈。';
+        var good=revalidateEvidence([{start:0,end:2}],'chapter_001',text);
+        var located=revalidateEvidence([{excerpt:'客栈'}],'chapter_001',text);
+        var ev=good.accepted[0];
+        return good.accepted.length===1&&good.rejected.length===0&&ev.excerpt==='林默'&&
+          ev.excerpt===text.slice(ev.start,ev.end)&&StoryContract.validateEvidence(ev,text).valid&&
+          located.accepted.length===1&&located.accepted[0].excerpt==='客栈';
+      })();
+      t(132,'Evidence 重验证（系统重新 slice，excerpt===slice）',evidenceRevalidated);
+
+      var evidenceRejected=(function(){
+        var text='林默走进客栈。';
+        var fabricated=revalidateEvidence([{start:0,end:2,excerpt:'萧炎'}],'chapter_001',text);
+        var outOfRange=revalidateEvidence([{start:0,end:999}],'chapter_001',text);
+        var wrongSource=revalidateEvidence([{sourceId:'chapter_099',start:0,end:2}],'chapter_001',text);
+        var missing=revalidateEvidence([{excerpt:'不存在的内容'}],'chapter_001',text);
+        return fabricated.accepted.length===0&&fabricated.rejected[0].reason.indexOf('编造')>=0&&
+          outOfRange.accepted.length===0&&wrongSource.accepted.length===0&&missing.accepted.length===0;
+      })();
+      t(133,'非法 Evidence 被拒绝（编造/越界/sourceId 不符/无法定位）',evidenceRejected);
+
+      var llmBeforeFromSystem=withState(p54Fixture('林默走进客栈。',{characters:['旧角色'],locations:[],events:[],foreshadowHits:[],emotions:[],timeHints:[],lastParsed:0}),function(){
+        var stored=StoryStore.getChapter('chapter_001').aiAnalysis;
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var cs=r.changeSet;
+        var draft=(cs?cs.changes:[]).filter(function(c){return c.path.indexOf('.aiAnalysis')>=0;})[0];
+        return r.source==='llm'&&!!draft&&StoryStore.hash(draft.before)===StoryStore.hash(stored)&&
+          draft.after.lastParsed!==stored.lastParsed&&draft.before.characters[0]==='旧角色';
+      });
+      t(134,'LLM proposal → StateChange（before 由系统生成，after 来自模型）',llmBeforeFromSystem);
+
+      var llmProposalCs=withState(p54Fixture('林默走进客栈。'),function(){
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var cs=r.changeSet;
+        return !!cs&&cs.status==='PROPOSED'&&cs.origin==='llm'&&cs.requiresHumanApproval===true&&
+          cs.source==='LLM.mock'&&cs.operation==='llm_extraction'&&cs.changes.length>0&&
+          cs.changeSetId.indexOf('cs_')===0&&!!cs.policy&&cs.chapterId==='chapter_001'&&
+          !!cs.llm&&cs.llm.provider==='mock'&&cs.llm.model==='mock-model-v1'&&
+          cs.llm.promptHash.length>0&&!!cs.llm.usage&&typeof cs.llm.latencyMs==='number';
+      });
+      t(135,'LLM proposal → ChangeSet（PROPOSED + 审计字段）',llmProposalCs);
+
+      var humanApprovalGate=withState(p54Fixture('林默走进客栈。'),function(){
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var cs=r.changeSet;
+        ChangeSetRuntime.validate(cs,{});
+        var compat=ChangeSetRuntime.approve(cs,'compat:runtime.execute',{});
+        var system=ChangeSetRuntime.approve(cs,'system',{});
+        var auto=ChangeSetRuntime.approve(cs,'auto',{});
+        var human=ChangeSetRuntime.approve(cs,'author:我',{});
+        return !compat.ok&&compat.errors.indexOf('human_approval_required')>=0&&
+          !system.ok&&!auto.ok&&human.ok&&cs.status==='APPROVED'&&cs.approval.human===true;
+      });
+      t(136,'人工审批硬门：系统/兼容批准人一律拒绝',humanApprovalGate);
+
+      var llmApplyApproved=withState(p54Fixture('林默走进客栈。'),function(){
+        var before=StoryStore.getCharacters().length;
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var name=r.extraction.characters[0].name;
+        var res=LLMChapterAnalysis.applyApproved(r.changeSet,'author:我',{});
+        var chars=StoryStore.getCharacters();
+        var created=chars.filter(function(c){return c.name===name;})[0];
+        return res.ok&&chars.length===before+1&&!!created&&created.tags.indexOf('llm')>=0&&
+          res.status==='VERIFIED'&&!!res.verified&&
+          (res.verified.hasChanges===true||res.verified.valid===true);
+      });
+      t(137,'人工批准后 LLM 提案正确写入状态',llmApplyApproved);
+
+      var llmAuditInLedger=withState(p54Fixture('林默走进客栈。'),function(){
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        LLMChapterAnalysis.applyApproved(r.changeSet,'author:我',{});
+        var e=StoryStore.getChangeLedger()[0];
+        return !!e&&e.origin==='llm'&&!!e.llm&&e.llm.provider==='mock'&&e.llm.model==='mock-model-v1'&&
+          e.llm.promptHash.length>0&&!!e.llm.usage&&e.llm.usage.outputTokens>0&&e.source==='LLM.mock';
+      });
+      t(138,'审计：provider/model/requestId/promptHash/usage/latency 入账本',llmAuditInLedger);
+
+      var apiKeySecurity=withState(p54Fixture('林默走进客栈。'),function(){
+        var saved=ProviderSettings.load();
+        var secret='sk-super-secret-key-987654';
+        ProviderSettings.save({enabled:true,provider:'openai-compatible',baseURL:'https://api.example.com/v1',model:'m-secret',apiKey:secret});
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var cs=r.changeSet;
+        var exportJson=StoryStore.exportJSON();
+        var ledgerJson=JSON.stringify(StoryStore.getChangeLedger());
+        var csJson=JSON.stringify(cs);
+        var masked=ProviderSettings.masked();
+        var contains=function(s){return String(s).indexOf(secret)>=0;};
+        var result=(!contains(exportJson)&&!contains(ledgerJson)&&!contains(csJson)&&
+          masked.apiKeyMasked!==secret&&masked.hasApiKey===true&&
+          ProviderSettings.load().apiKey===secret);
+        ProviderSettings.save(saved);
+        return result;
+      });
+      t(139,'API Key 不进入 StoryState / export / 账本 / ChangeSet',apiKeySecurity);
+
+      var providerErrorNoMutation=withState(p54Fixture('林默走进客栈。'),function(){
+        var h=StoryStore.hash(StoryStore.snapshot());
+        LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options('timeout'));
+        LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options('auth_error'));
+        return StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0;
+      });
+      t(140,'Provider 错误不改变 StoryState',providerErrorNoMutation);
+
+      var rejectedLlmNoMutation=withState(p54Fixture('林默走进客栈。'),function(){
+        var r=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        ChangeSetRuntime.validate(r.changeSet,{});
+        ChangeSetRuntime.reject(r.changeSet,'作者拒绝',{});
+        var h=StoryStore.hash(StoryStore.snapshot());
+        var res=ChangeSetRuntime.apply(r.changeSet,{});
+        return !res.ok&&res.errors.indexOf('changeset_not_approved')>=0&&
+          StoryStore.hash(StoryStore.snapshot())===h&&StoryStore.getChangeLedger().length===0&&
+          StoryStore.getCharacters().length===0;
+      });
+      t(141,'被拒绝的 LLM 提案不改变状态',rejectedLlmNoMutation);
+
+      // --- 142-147: Ollama / UI / 一致性 ---
+      var ollamaOk=(function(){
+        var t2=(function(){
+          var captured=null;
+          var t=function(url,init){captured={url:url,init:init};return{ok:true,status:200,text:JSON.stringify({message:{content:JSON.stringify({characters:[{name:'林默'}]})},prompt_eval_count:5,eval_count:7})};};
+          t.captured=function(){return captured;};
+          return t;
+        })();
+        var p=OllamaProvider({baseURL:'http://localhost:11434',model:'llama3',transport:t2});
+        var res=p.complete({input:'林默'},{});   // 无需 API Key
+        var cap=t2.captured();
+        var body=JSON.parse(cap.init.body);
+        return p.provider==='ollama'&&cap.url==='http://localhost:11434/api/chat'&&body.format==='json'&&
+          res.success&&res.usage.inputTokens===5&&res.structured.characters[0].name==='林默'&&
+          cap.init.headers.Authorization===undefined;
+      })();
+      t(142,'Ollama Provider（baseURL+model，无需 API Key）',ollamaOk);
+
+      var uiProviderSettings=(function(){
+        var html=providerSettingsHTML();
+        return html.indexOf('Base URL')>=0&&html.indexOf('API Key')>=0&&html.indexOf('Temperature')>=0&&
+          html.indexOf('Max Tokens')>=0&&html.indexOf('Timeout')>=0&&html.indexOf('启用 LLM')>=0&&
+          html.indexOf('API Key 仅保存在本机浏览器存储')>=0;
+      })();
+      t(143,'设置页 Provider 配置（含 API Key 风险提示）',uiProviderSettings);
+
+      var uiLlmAnalyze=withState(p54Fixture('林默走进客栈。'),function(){
+        curChId='chapter_001';
+        var saved=ProviderSettings.load();
+        ProviderSettings.save({enabled:true,provider:'mock',model:'mock-model-v1'});
+        var r=runLLMAnalysis();
+        var pending=!!_pendingLLMChangeSet;
+        var applied=pending?approveLLMAnalysis():{ok:false};
+        ProviderSettings.save(saved);
+        var st=llmStatusHTML(r);
+        return !!r&&r.source==='llm'&&pending&&applied.ok&&st.indexOf('LLM 分析')>=0&&
+          StoryStore.getCharacters().length>0;
+      });
+      t(144,'Copilot LLM 分析闭环（状态展示 + 人工采用）',uiLlmAnalyze);
+
+      var uiLlmFallback=withState(p54Fixture('林默走进客栈。'),function(){
+        curChId='chapter_001';
+        var saved=ProviderSettings.load();
+        ProviderSettings.save({enabled:false,provider:'mock'});
+        var r=runLLMAnalysis();
+        ProviderSettings.save(saved);
+        return !!r&&r.source==='deterministic'&&_pendingLLMChangeSet===null&&
+          llmStatusHTML(r).indexOf('降级')>=0;
+      });
+      t(145,'Copilot LLM 不可用时降级展示',uiLlmFallback);
+
+      var fallbackDeterministic=withState(p54Fixture('林默走进客栈。'),function(){
+        var o1=p54Options('timeout');o1.now=1000;
+        var o2=p54Options('timeout');o2.now=1000;
+        var a=LLMChapterAnalysis.analyzeChapter('chapter_001',o1);
+        var b=LLMChapterAnalysis.analyzeChapter('chapter_001',o2);
+        return a.source==='deterministic'&&b.source==='deterministic'&&
+          StoryStore.hash(a.analysis)===StoryStore.hash(b.analysis)&&a.reason===b.reason;
+      });
+      t(146,'确定性 fallback 可重复（同输入同结果）',fallbackDeterministic);
+
+      var changeSetSameSafety=withState(p54Fixture('林默走进客栈。'),function(){
+        var r1=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        var r2=LLMChapterAnalysis.analyzeChapter('chapter_001',p54Options());
+        return r1.changeSet.changeSetId===r2.changeSet.changeSetId&&
+          r1.changeSet.changes.length===r2.changeSet.changes.length&&
+          r1.changeSet.changes[0].changeId===r2.changeSet.changes[0].changeId&&
+          r1.changeSet.requiresHumanApproval===true;
+      });
+      t(147,'同一章节的 LLM 提案幂等（changeSetId 稳定）',changeSetSameSafety);
+
       return{results:results,allPass:results.every(function(r){return r.pass;})};
+
 
     }
   };
@@ -3329,8 +3790,19 @@ var ChangeSetRuntime=(function(){
       if(!v.ok)return{ok:false,status:changeSet.status,errors:v.validation.errors};
     }
     if(changeSet.status!==S.VALID)return{ok:false,status:changeSet.status,errors:['approve: status must be VALID, got '+changeSet.status]};
+    // Phase 5.4: 真实 LLM 提案只能由"人"批准，系统/兼容批准人一律拒绝
+    var who=String(approver||'');
+    if(changeSet.requiresHumanApproval===true){
+      var isSystem=(!who||who==='system'||who.indexOf('system:')===0||who.indexOf('compat:')===0||who==='auto');
+      if(isSystem){
+        changeSet.errors=(changeSet.errors||[]).concat(['human_approval_required']);
+        return{ok:false,status:changeSet.status,errors:['human_approval_required']};
+      }
+      changeSet.approval={approver:who,approvedAt:nowOf(options),human:true};
+    }else{
+      changeSet.approval={approver:who||'author',approvedAt:nowOf(options)};
+    }
     changeSet.status=S.APPROVED;
-    changeSet.approval={approver:String(approver||'author'),approvedAt:nowOf(options)};
     return{ok:true,status:S.APPROVED,errors:[]};
   }
 
@@ -3443,6 +3915,9 @@ var ChangeSetRuntime=(function(){
       chapterId:changeSet.chapterId||'',ruleId:changeSet.ruleId||'',issueId:changeSet.issueId||'',
       actionId:changeSet.actionId||'',actionType:changeSet.actionType||'',
       changes:(changeSet.changes||[]).map(function(c){return c.path;}),
+      origin:changeSet.origin||'runtime',
+      llm:changeSet.llm?{provider:changeSet.llm.provider,model:changeSet.llm.model,requestId:changeSet.llm.requestId,
+        promptHash:changeSet.llm.promptHash,usage:changeSet.llm.usage,latencyMs:changeSet.llm.latencyMs}:null,
       status:S.VERIFIED,appliedAt:at,appliedCount:results.length,
       stateHashBefore:StoryStore.hash(before),stateHashAfter:StoryStore.hash(after)
     });
@@ -3608,6 +4083,656 @@ var ActionMigration=(function(){
 
 AIRuntime.ActionMigration=ActionMigration;
 
+// ===== Phase 5.4: AI Provider Contract (Provider -> ProviderResult；永不触碰 StoryState) =====
+// 隔离约束：Provider 区块只做 input -> output。不允许调用 StoryStore / StoryEngine / ExecutionLayer。
+var ProviderErrors={
+  CONFIG_ERROR:'CONFIG_ERROR',AUTH_ERROR:'AUTH_ERROR',NETWORK_ERROR:'NETWORK_ERROR',
+  TIMEOUT:'TIMEOUT',RATE_LIMIT:'RATE_LIMIT',INVALID_RESPONSE:'INVALID_RESPONSE',
+  SCHEMA_ERROR:'SCHEMA_ERROR',PROVIDER_ERROR:'PROVIDER_ERROR',BUDGET_EXCEEDED:'BUDGET_EXCEEDED',
+  UNKNOWN_ERROR:'UNKNOWN_ERROR'
+};
+function providerErrorCodes(){
+  var out=[];Object.keys(ProviderErrors).forEach(function(k){out.push(ProviderErrors[k]);});return out;
+}
+function makeProviderError(code,message,details){
+  var list=providerErrorCodes();
+  var c=(list.indexOf(code)>=0)?code:ProviderErrors.UNKNOWN_ERROR;
+  return{code:c,message:String(message||''),details:details||null,
+    retryable:(c===ProviderErrors.TIMEOUT||c===ProviderErrors.NETWORK_ERROR||c===ProviderErrors.RATE_LIMIT||c===ProviderErrors.PROVIDER_ERROR)};
+}
+// 粗估 token（不实现复杂 tokenizer；CJK 与 ASCII 混合按 ~2 字符/token）
+function estimateTokens(text){return Math.ceil(String(text==null?'':text).length/2);}
+function checkTokenBudget(request,options){
+  var opts=options||{},budget=opts.budget||{};
+  var input=estimateTokens((request&&request.input)||'');
+  var maxInput=(typeof budget.maxInputTokens==='number')?budget.maxInputTokens:0;
+  var maxOutput=(typeof budget.maxOutputTokens==='number')?budget.maxOutputTokens:0;
+  var want=(typeof opts.maxTokens==='number')?opts.maxTokens:0;
+  if(maxInput>0&&input>maxInput)return{ok:false,inputTokens:input,error:makeProviderError(ProviderErrors.BUDGET_EXCEEDED,'输入超出预算（'+input+' > '+maxInput+' tokens）',{inputTokens:input,maxInputTokens:maxInput})};
+  if(maxOutput>0&&want>maxOutput)return{ok:false,inputTokens:input,error:makeProviderError(ProviderErrors.BUDGET_EXCEEDED,'输出请求超出预算（'+want+' > '+maxOutput+' tokens）',{requestedMaxTokens:want,maxOutputTokens:maxOutput})};
+  return{ok:true,inputTokens:input};
+}
+var AIProviderContract={
+  REQUIRED_METHODS:['complete'],
+  OPTIONAL_METHODS:['stream'],
+  validate:function(p){
+    var errors=[];
+    if(!p||typeof p!=='object')return{valid:false,errors:['provider: expected object']};
+    AIProviderContract.REQUIRED_METHODS.forEach(function(m){if(typeof p[m]!=='function')errors.push('provider.'+m+': required function');});
+    if(p.stream!==undefined&&typeof p.stream!=='function')errors.push('provider.stream: expected function');
+    if(!p.provider&&!p.providerId)errors.push('provider.provider: required');
+    return{valid:errors.length===0,errors:errors};
+  }
+};
+var PROVIDER_RESULT_FIELDS=['provider','model','requestId','success','output','structured','usage','latencyMs','error','rawResponse'];
+function makeProviderResult(fields){
+  var f=fields||{};
+  return{
+    provider:String(f.provider||''),
+    model:String(f.model||''),
+    requestId:String(f.requestId||''),
+    success:f.success===true,
+    output:(f.output===undefined?null:f.output),
+    structured:(f.structured===undefined?null:f.structured),
+    usage:{inputTokens:(f.usage&&typeof f.usage.inputTokens==='number')?f.usage.inputTokens:null,
+      outputTokens:(f.usage&&typeof f.usage.outputTokens==='number')?f.usage.outputTokens:null,
+      totalTokens:(f.usage&&typeof f.usage.totalTokens==='number')?f.usage.totalTokens:null},
+    latencyMs:(typeof f.latencyMs==='number')?f.latencyMs:0,
+    error:f.error||null,
+    rawResponse:(f.rawResponse===undefined?null:f.rawResponse)
+  };
+}
+function validateProviderResult(r){
+  var errors=[];
+  if(!r||typeof r!=='object')return{valid:false,errors:['result: expected object']};
+  PROVIDER_RESULT_FIELDS.forEach(function(k){if(!(k in r))errors.push('result.'+k+': required');});
+  if(typeof r.success!=='boolean')errors.push('result.success: expected boolean');
+  if(r.error&&providerErrorCodes().indexOf(r.error.code)<0)errors.push('result.error.code: unknown '+r.error.code);
+  if(r.success&&r.error)errors.push('result: success with error');
+  if(!r.success&&!r.error)errors.push('result: failure without error');
+  var fns=StoryContract.collectFunctionPaths({output:r.output,structured:r.structured});
+  if(fns.length)errors.push('result: executable values at '+fns.join(', '));
+  return{valid:errors.length===0,errors:errors};
+}
+function isThenable(v){return !!v&&typeof v==='object'&&typeof v.then==='function';}
+function providerRequestId(cfg,request){
+  // 纯本地确定性 id（不依赖 StoryStore / 时间 / 随机）
+  var s=String((cfg&&cfg.provider)||'')+'|'+String((cfg&&cfg.model)||'')+'|'+String((request&&request.input)||'').slice(0,200);
+  var h=0;
+  for(var i=0;i<s.length;i++){h=((h<<5)-h+s.charCodeAt(i))|0;}
+  return 'req_'+Math.abs(h).toString(36);
+}
+
+// ===== MockAIProvider（默认离线、无 API Key、无网络、确定性）=====
+function mockExtractionFromRequest(request){
+  var text=String((request&&request.input)||'');
+  var chapterId=String((request&&request.chapterId)||'');
+  var m=text.match(/[\u4e00-\u9fa5]{2,3}/);
+  var name=m?m[0]:'主角';
+  var at=text.indexOf(name);
+  if(at<0)at=0;
+  return{characters:[{name:name,evidence:[{sourceId:chapterId,start:at,end:at+name.length}]}],
+    locations:[],events:[],relationships:[],foreshadowing:[],timeline:[],emotions:[]};
+}
+function MockAIProvider(options){
+  var opts=options||{};
+  var scenario=opts.scenario||'success';
+  var canned=opts.output||null;
+  return{
+    providerId:'mock',provider:'mock',model:String(opts.model||'mock-model-v1'),
+    offline:true,requiresApiKey:false,deterministic:true,
+    scenarios:['success','timeout','network_error','auth_error','rate_limit','malformed_json','schema_error','empty','provider_error'],
+    getScenario:function(){return scenario;},
+    setScenario:function(s){scenario=String(s||'success');return scenario;},
+    complete:function(request,o){return mockComplete(request,o,scenario,canned,opts);},
+    stream:function(request,onChunk,o){
+      var res=mockComplete(request,o,scenario,canned,opts);
+      var text=String(res.rawResponse||'');
+      var chunks=0;
+      for(var i=0;i<text.length;i+=40){
+        chunks++;
+        if(typeof onChunk==='function')onChunk({delta:text.slice(i,i+40),index:chunks-1});
+      }
+      res.chunks=chunks;
+      return res;
+    }
+  };
+}
+function mockComplete(request,options,scenario,canned,providerOpts){
+  var model=String((providerOpts&&providerOpts.model)||'mock-model-v1');
+  var requestId='mock-'+(scenario||'success');
+  var inputTokens=estimateTokens((request&&request.input)||'');
+  function fail(code,message,raw){
+    return makeProviderResult({provider:'mock',model:model,requestId:requestId,success:false,output:null,structured:null,
+      usage:{inputTokens:inputTokens,outputTokens:0,totalTokens:null},latencyMs:0,
+      error:makeProviderError(code,message),rawResponse:(raw===undefined?null:raw)});
+  }
+  if(scenario==='timeout')return fail(ProviderErrors.TIMEOUT,'模拟超时');
+  if(scenario==='network_error')return fail(ProviderErrors.NETWORK_ERROR,'模拟网络错误');
+  if(scenario==='auth_error')return fail(ProviderErrors.AUTH_ERROR,'模拟鉴权失败');
+  if(scenario==='rate_limit')return fail(ProviderErrors.RATE_LIMIT,'模拟限流');
+  if(scenario==='provider_error')return fail(ProviderErrors.PROVIDER_ERROR,'模拟服务端错误');
+  if(scenario==='empty')return fail(ProviderErrors.INVALID_RESPONSE,'模型返回空响应','');
+  if(scenario==='malformed_json')return fail(ProviderErrors.INVALID_RESPONSE,'模型输出不是合法 JSON（拒绝猜测）','{characters:[');
+  if(scenario==='schema_error')return fail(ProviderErrors.SCHEMA_ERROR,'结构化输出不符合 schema',JSON.stringify({characters:'not-an-array'}));
+  var structured=(canned||mockExtractionFromRequest(request));
+  var text=JSON.stringify(structured);
+  if(options&&options.schema&&typeof options.schema.validate==='function'){
+    var v=options.schema.validate(structured);
+    if(!v||v.valid!==true)return fail(ProviderErrors.SCHEMA_ERROR,'结构化输出不符合 schema',text);
+  }
+  return makeProviderResult({provider:'mock',model:model,requestId:requestId,success:true,output:text,structured:structured,
+    usage:{inputTokens:inputTokens,outputTokens:estimateTokens(text),totalTokens:null},latencyMs:0,error:null,rawResponse:text});
+}
+
+// ===== OpenAI-compatible Provider（唯一真实 HTTP 实现；transport 可注入以便离线测试）=====
+function defaultProviderTransport(url,init){
+  if(typeof fetch!=='function')return Promise.reject(new Error('fetch unavailable (NETWORK_ERROR)'));
+  return fetch(url,init).then(function(res){
+    return res.text().then(function(t){return{ok:res.ok,status:res.status,text:t};});
+  });
+}
+function classifyTransportThrow(e){
+  var msg=String((e&&e.message)||e||'');
+  if(/timeout|timed out|abort/i.test(msg))return makeProviderError(ProviderErrors.TIMEOUT,msg);
+  if(/fetch|network|enotfound|econn|dns|socket|unavailable/i.test(msg))return makeProviderError(ProviderErrors.NETWORK_ERROR,msg);
+  return makeProviderError(ProviderErrors.UNKNOWN_ERROR,msg);
+}
+function classifyHttpResponse(res){
+  if(!res)return makeProviderError(ProviderErrors.UNKNOWN_ERROR,'空响应对象');
+  var status=(typeof res.status==='number')?res.status:0;
+  if(status===401||status===403)return makeProviderError(ProviderErrors.AUTH_ERROR,'HTTP '+status);
+  if(status===429)return makeProviderError(ProviderErrors.RATE_LIMIT,'HTTP 429');
+  if(status===400||status===404||status===422)return makeProviderError(ProviderErrors.CONFIG_ERROR,'HTTP '+status);
+  if(status>=500)return makeProviderError(ProviderErrors.PROVIDER_ERROR,'HTTP '+status);
+  if(res.ok===false&&status===0)return makeProviderError(ProviderErrors.NETWORK_ERROR,'传输失败');
+  return null;
+}
+function buildProviderBody(cfg,request,options){
+  var opts=options||{};
+  var content=String((request&&request.input)||'');
+  var sys=String((request&&request.system)||'你是结构化抽取器，只输出 JSON。');
+  var messages=[{role:'system',content:sys},{role:'user',content:content}];
+  var temperature=(typeof opts.temperature==='number')?opts.temperature:((typeof cfg.temperature==='number')?cfg.temperature:0.2);
+  if((cfg.envelopeMode||'openai')==='ollama')return{model:String(cfg.model||''),messages:messages,stream:false,format:'json',options:{temperature:temperature}};
+  var body={model:String(cfg.model||''),messages:messages,temperature:temperature,response_format:{type:'json_object'}};
+  var mt=(typeof opts.maxTokens==='number')?opts.maxTokens:cfg.maxTokens;
+  if(typeof mt==='number'&&mt>0)body.max_tokens=mt;
+  return body;
+}
+function extractEnvelopeContent(envelope,mode){
+  if(mode==='ollama'){
+    if(envelope&&envelope.message&&typeof envelope.message.content==='string')return envelope.message.content;
+    return null;
+  }
+  try{return envelope.choices[0].message.content;}catch(e){return null;}
+}
+function extractEnvelopeUsage(envelope,mode){
+  if(mode==='ollama')return{inputTokens:(envelope&&envelope.prompt_eval_count)||null,outputTokens:(envelope&&envelope.eval_count)||null,totalTokens:null};
+  var u=(envelope&&envelope.usage)||{};
+  return{inputTokens:u.prompt_tokens||null,outputTokens:u.completion_tokens||null,totalTokens:u.total_tokens||null};
+}
+function openAICompatibleComplete(request,options,deps){
+  var cfg=deps.cfg||{},apiKey=String(deps.apiKey||''),transport=deps.transport||defaultProviderTransport;
+  var opts=options||{};
+  var mode=cfg.envelopeMode||'openai';
+  var model=String(cfg.model||'');
+  var requestId=String(opts.requestId||providerRequestId(cfg,request));
+  var attempts=0;
+  var started=(typeof opts.now==='number')?opts.now:Date.now();
+  function elapsed(){return Math.max(0,((typeof opts.now==='number')?opts.now:Date.now())-started);}
+  function result(fields){
+    var r=makeProviderResult({provider:String(cfg.provider||'openai-compatible'),model:model,requestId:requestId,
+      success:fields.success===true,output:(fields.output===undefined?null:fields.output),
+      structured:(fields.structured===undefined?null:fields.structured),
+      usage:fields.usage||{inputTokens:null,outputTokens:null,totalTokens:null},
+      latencyMs:(typeof fields.latencyMs==='number')?fields.latencyMs:elapsed(),
+      error:fields.error||null,rawResponse:(fields.rawResponse===undefined?null:fields.rawResponse)});
+    r.attempts=attempts;
+    return r;
+  }
+  var budget=checkTokenBudget(request,{budget:{maxInputTokens:cfg.maxInputTokens,maxOutputTokens:cfg.maxOutputTokens},maxTokens:opts.maxTokens});
+  if(!budget.ok)return result({success:false,error:budget.error,usage:{inputTokens:budget.inputTokens,outputTokens:0,totalTokens:null}});
+  if(!cfg.baseURL)return result({success:false,error:makeProviderError(ProviderErrors.CONFIG_ERROR,'缺少 baseURL')});
+  if(!/^https?:\/\//.test(String(cfg.baseURL)))return result({success:false,error:makeProviderError(ProviderErrors.CONFIG_ERROR,'baseURL 必须是 http(s) 地址')});
+  if(cfg.requiresApiKey!==false&&!apiKey)return result({success:false,error:makeProviderError(ProviderErrors.AUTH_ERROR,'缺少 API Key')});
+  var url=String(cfg.baseURL).replace(/\/+$/,'')+String(cfg.path||'/chat/completions');
+  var headers={'Content-Type':'application/json'};
+  if(apiKey)headers.Authorization='Bearer '+apiKey;
+  var init={method:'POST',headers:headers,body:JSON.stringify(buildProviderBody(cfg,request,opts))};
+  var maxAttempts=((typeof opts.maxRetries==='number')?opts.maxRetries:((typeof cfg.maxRetries==='number')?cfg.maxRetries:0))+1;
+  function onValue(res){
+    var err=classifyHttpResponse(res);
+    if(err){
+      if(err.retryable&&attempts<maxAttempts)return attempt();
+      return result({success:false,error:err,rawResponse:(res&&res.text!==undefined)?String(res.text):null});
+    }
+    var raw=(res&&res.text!==undefined)?String(res.text):'';
+    if(!raw)return result({success:false,error:makeProviderError(ProviderErrors.INVALID_RESPONSE,'响应为空'),rawResponse:''});
+    var envelope=null;
+    try{envelope=JSON.parse(raw);}catch(e){return result({success:false,error:makeProviderError(ProviderErrors.INVALID_RESPONSE,'响应不是合法 JSON（拒绝猜测）'),rawResponse:raw});}
+    var content=extractEnvelopeContent(envelope,mode);
+    if(typeof content!=='string'||!content.length)return result({success:false,error:makeProviderError(ProviderErrors.INVALID_RESPONSE,'缺少模型输出内容'),rawResponse:raw});
+    var structured=null;
+    try{structured=JSON.parse(content);}catch(e){return result({success:false,error:makeProviderError(ProviderErrors.INVALID_RESPONSE,'模型输出不是合法 JSON（拒绝猜测）'),rawResponse:content});}
+    if(opts.schema&&typeof opts.schema.validate==='function'){
+      var v=opts.schema.validate(structured);
+      if(!v||v.valid!==true)return result({success:false,error:makeProviderError(ProviderErrors.SCHEMA_ERROR,'结构化输出不符合 schema',{errors:(v&&v.errors)||[]}),rawResponse:content});
+    }
+    return result({success:true,output:content,structured:structured,usage:extractEnvelopeUsage(envelope,mode),rawResponse:raw});
+  }
+  function onThrow(e){
+    var terr=classifyTransportThrow(e);
+    if(terr.retryable&&attempts<maxAttempts)return attempt();
+    return result({success:false,error:terr});
+  }
+  function attempt(){
+    attempts++;
+    var out;
+    try{out=transport(url,init);}catch(e){return onThrow(e);}
+    if(isThenable(out)){
+      var timeoutMs=(typeof opts.timeoutMs==='number')?opts.timeoutMs:cfg.timeoutMs;
+      var chained=out.then(onValue,onThrow);
+      if(typeof timeoutMs==='number'&&timeoutMs>0&&typeof setTimeout==='function'){
+        return Promise.race([chained,new Promise(function(resolve){
+          setTimeout(function(){resolve(result({success:false,error:makeProviderError(ProviderErrors.TIMEOUT,'请求超时（'+timeoutMs+'ms）'),latencyMs:timeoutMs}));},timeoutMs);
+        })]);
+      }
+      return chained;
+    }
+    return onValue(out);
+  }
+  return attempt();
+}
+function OpenAICompatibleProvider(config){
+  var cfg=config||{};
+  var apiKey=String(cfg.apiKey||''); // 只存在于闭包内，绝不进入 ProviderResult / 审计 / StoryState
+  var transport=cfg.transport||defaultProviderTransport;
+  return{
+    providerId:String(cfg.providerId||'openai-compatible'),
+    provider:String(cfg.provider||'openai-compatible'),
+    model:String(cfg.model||''),
+    baseURL:String(cfg.baseURL||''),
+    offline:false,requiresApiKey:true,deterministic:false,
+    complete:function(request,options){return openAICompatibleComplete(request,options,{cfg:cfg,apiKey:apiKey,transport:transport});},
+    stream:function(request,onChunk,options){
+      var res=openAICompatibleComplete(request,options,{cfg:cfg,apiKey:apiKey,transport:transport});
+      if(isThenable(res))return res.then(function(r){if(typeof onChunk==='function')onChunk({delta:String(r.output||r.rawResponse||''),index:0});return r;});
+      if(typeof onChunk==='function')onChunk({delta:String(res.output||res.rawResponse||''),index:0});
+      return res;
+    }
+  };
+}
+function OllamaProvider(config){
+  var cfg=config||{};
+  cfg.provider=cfg.provider||'ollama';
+  cfg.providerId=cfg.providerId||'ollama';
+  cfg.path=cfg.path||'/api/chat';
+  cfg.envelopeMode='ollama';
+  if(cfg.requiresApiKey===undefined)cfg.requiresApiKey=false;
+  var p=OpenAICompatibleProvider(cfg);
+  p.provider='ollama';p.providerId='ollama';p.offline=false;
+  return p;
+}
+var ProviderRegistry=(function(){
+  var factories={
+    mock:function(cfg){return MockAIProvider(cfg);},
+    'openai-compatible':function(cfg){return OpenAICompatibleProvider(cfg);},
+    ollama:function(cfg){return OllamaProvider(cfg);}
+  };
+  return{
+    kinds:function(){return Object.keys(factories);},
+    register:function(kind,fn){factories[String(kind)]=fn;return true;},
+    create:function(cfg){
+      cfg=cfg||{};
+      var kind=String(cfg.provider||'mock');
+      var f=factories[kind];
+      if(!f)return null;
+      return f(cfg);
+    }
+  };
+})();
+// ===== Provider Settings（API Key 只存本机 localStorage 的独立键，绝不进入 StoryState）=====
+var PROVIDER_CONFIG_KEY='novelcraft_provider_config_v1';
+var ProviderSettings={
+  KEY:PROVIDER_CONFIG_KEY,
+  defaults:function(){
+    return{enabled:false,provider:'mock',baseURL:'',model:'mock-model-v1',apiKey:'',
+      temperature:0.2,maxTokens:1024,timeoutMs:15000,maxRetries:1,maxInputTokens:6000,maxOutputTokens:1500};
+  },
+  load:function(){
+    var d=ProviderSettings.defaults();
+    try{
+      var raw=localStorage.getItem(PROVIDER_CONFIG_KEY);
+      var cfg=raw?JSON.parse(raw):{};
+      Object.keys(d).forEach(function(k){if(cfg[k]===undefined)cfg[k]=d[k];});
+      return cfg;
+    }catch(e){return d;}
+  },
+  save:function(cfg){
+    var d=ProviderSettings.defaults(),out={};
+    Object.keys(d).forEach(function(k){out[k]=(cfg&&cfg[k]!==undefined)?cfg[k]:d[k];});
+    try{localStorage.setItem(PROVIDER_CONFIG_KEY,JSON.stringify(out));}catch(e){}
+    return out;
+  },
+  masked:function(cfg){
+    cfg=cfg||ProviderSettings.load();
+    var key=String(cfg.apiKey||'');
+    return{enabled:!!cfg.enabled,provider:String(cfg.provider||''),baseURL:String(cfg.baseURL||''),
+      model:String(cfg.model||''),hasApiKey:!!key,apiKeyMasked:key?('****'+key.slice(-4)):'',
+      temperature:cfg.temperature,maxTokens:cfg.maxTokens,timeoutMs:cfg.timeoutMs};
+  },
+  clear:function(){try{localStorage.removeItem(PROVIDER_CONFIG_KEY);}catch(e){}return ProviderSettings.defaults();}
+};
+var ProviderRuntime={
+  lastResult:null,lastChunks:0,
+  resolve:function(options){
+    var opts=options||{};
+    if(opts.provider)return opts.provider;
+    var cfg=opts.config||ProviderSettings.load();
+    if(!cfg.enabled)return null;
+    return ProviderRegistry.create(cfg);
+  },
+  config:function(options){return (options&&options.config)||ProviderSettings.load();},
+  complete:function(provider,request,options){
+    var check=AIProviderContract.validate(provider);
+    if(!check.valid){
+      var bad=makeProviderResult({success:false,error:makeProviderError(ProviderErrors.CONFIG_ERROR,check.errors.join('; '))});
+      ProviderRuntime.lastResult=bad;
+      return bad;
+    }
+    var res=provider.complete(request||{},options||{});
+    if(isThenable(res))return res.then(function(r){ProviderRuntime.lastResult=r;return r;});
+    ProviderRuntime.lastResult=res;
+    return res;
+  },
+  stream:function(provider,request,onChunk,options){
+    if(!provider||typeof provider.stream!=='function')return ProviderRuntime.complete(provider,request,options);
+    var chunks=0;
+    var wrapped=function(c){chunks++;if(typeof onChunk==='function')onChunk(c);};
+    var res=provider.stream(request||{},wrapped,options||{});
+    function done(r){r.chunks=chunks;ProviderRuntime.lastChunks=chunks;ProviderRuntime.lastResult=r;return r;}
+    if(isThenable(res))return res.then(done);
+    return done(res);
+  },
+  auditFields:function(res){
+    if(!res)return null;
+    return{provider:res.provider,model:res.model,requestId:res.requestId,
+      promptHash:String((res.requestId||'')),usage:res.usage,latencyMs:res.latencyMs};
+  }
+};
+
+// ===== Phase 5.4: LLM 结构化输出契约（JSON -> Parse -> Schema Validate -> Normalize）=====
+var ChapterExtractionSchema={
+  name:'ChapterExtraction',
+  ARRAY_FIELDS:['characters','locations','events','relationships','foreshadowing','timeline','emotions'],
+  validate:function(obj){
+    var errors=[];
+    if(!obj||typeof obj!=='object'||Array.isArray(obj))return{valid:false,errors:['extraction: expected object']};
+    ChapterExtractionSchema.ARRAY_FIELDS.forEach(function(k){
+      if(obj[k]===undefined)return;
+      if(!Array.isArray(obj[k]))errors.push(k+': expected array');
+    });
+    if(Array.isArray(obj.characters)){
+      obj.characters.forEach(function(c,i){
+        if(!c||typeof c!=='object'){errors.push('characters['+i+']: expected object');return;}
+        if(typeof c.name!=='string'||!c.name.length)errors.push('characters['+i+'].name: required string');
+        if(c.confidence!==undefined&&typeof c.confidence!=='number')errors.push('characters['+i+'].confidence: expected number');
+        if(c.evidence!==undefined&&!Array.isArray(c.evidence))errors.push('characters['+i+'].evidence: expected array');
+      });
+    }
+    [['locations','name'],['events','event'],['foreshadowing','content'],['timeline','time'],['emotions','emotion']].forEach(function(pair){
+      var k=pair[0],label=pair[1];
+      if(!Array.isArray(obj[k]))return;
+      obj[k].forEach(function(item,i){
+        if(typeof item==='string')return;
+        if(!item||typeof item!=='object'){errors.push(k+'['+i+']: expected string or object');return;}
+        if(item[label]!==undefined&&typeof item[label]!=='string')errors.push(k+'['+i+'].'+label+': expected string');
+      });
+    });
+    if(Array.isArray(obj.relationships)){
+      obj.relationships.forEach(function(r,i){
+        if(!r||typeof r!=='object'){errors.push('relationships['+i+']: expected object');return;}
+        if(typeof r.from!=='string'&&typeof r.fromId!=='string')errors.push('relationships['+i+'].from: required string');
+        if(typeof r.to!=='string'&&typeof r.toId!=='string')errors.push('relationships['+i+'].to: required string');
+        if(r.type!==undefined&&typeof r.type!=='string')errors.push('relationships['+i+'].type: expected string');
+      });
+    }
+    return{valid:errors.length===0,errors:errors};
+  }
+};
+function normalizeChapterExtraction(obj){
+  var out={};
+  ChapterExtractionSchema.ARRAY_FIELDS.forEach(function(k){out[k]=Array.isArray(obj&&obj[k])?obj[k].slice():[];});
+  out.characters=out.characters.filter(function(c){return c&&typeof c==='object'&&typeof c.name==='string'&&c.name.length;})
+    .map(function(c){return{name:String(c.name),confidence:(typeof c.confidence==='number')?c.confidence:null,
+      evidence:Array.isArray(c.evidence)?c.evidence.slice():[]};});
+  out.locations=out.locations.map(function(l){return (typeof l==='string')?{name:l}:{name:String((l&&(l.name||l.location))||'')};})
+    .filter(function(l){return !!l.name;});
+  out.events=out.events.map(function(e){return (typeof e==='string')?{event:e}:{event:String((e&&e.event)||''),evidence:Array.isArray(e&&e.evidence)?e.evidence.slice():[]};})
+    .filter(function(e){return !!e.event;});
+  out.foreshadowing=out.foreshadowing.map(function(f){return (typeof f==='string')?{content:f}:{content:String((f&&(f.content||f.text))||''),evidence:Array.isArray(f&&f.evidence)?f.evidence.slice():[]};})
+    .filter(function(f){return !!f.content;});
+  out.timeline=out.timeline.map(function(t){return (typeof t==='string')?{time:t}:{time:String((t&&(t.time||t.hint))||''),evidence:Array.isArray(t&&t.evidence)?t.evidence.slice():[]};})
+    .filter(function(t){return !!t.time;});
+  out.emotions=out.emotions.map(function(em){return (typeof em==='string')?{emotion:em}:{emotion:String((em&&(em.emotion||em.name))||'')};})
+    .filter(function(em){return !!em.emotion;});
+  out.relationships=out.relationships.map(function(r){
+    return{from:String((r&&(r.from||r.fromId))||''),to:String((r&&(r.to||r.toId))||''),type:String((r&&r.type)||'')};
+  }).filter(function(r){return !!r.from&&!!r.to;});
+  return out;
+}
+// ===== Evidence 重新验证：LLM 提供的 evidence 不可信，必须由系统重新读取原文并 slice =====
+function revalidateEvidence(rawList,chapterId,sourceText){
+  var accepted=[],rejected=[];
+  var text=String(sourceText||'');
+  (Array.isArray(rawList)?rawList:[]).forEach(function(raw,i){
+    var srcId=String((raw&&raw.sourceId)||chapterId||'');
+    if(srcId!==String(chapterId||'')){rejected.push({index:i,reason:'sourceId 不匹配：'+srcId});return;}
+    var start=(raw&&typeof raw.start==='number')?raw.start:null;
+    var end=(raw&&typeof raw.end==='number')?raw.end:null;
+    if(start===null&&raw&&typeof raw.excerpt==='string'){
+      var at=text.indexOf(raw.excerpt);
+      if(at<0){rejected.push({index:i,reason:'excerpt 无法在原文中定位'});return;}
+      start=at;end=at+raw.excerpt.length;
+    }
+    if(start===null||end===null||start<0||end<=start||end>text.length){rejected.push({index:i,reason:'范围非法或越界'});return;}
+    var slice=text.slice(start,end);
+    if(raw&&typeof raw.excerpt==='string'&&raw.excerpt!==slice){rejected.push({index:i,reason:'excerpt 与原文切片不一致（疑似编造）'});return;}
+    var ev=StoryContract.makeEvidence('chapter',srcId,start,end,slice);
+    var v=StoryContract.validateEvidence(ev,text);
+    if(!v.valid){rejected.push({index:i,reason:'Evidence 校验失败：'+v.errors.join('; ')});return;}
+    accepted.push(ev);
+  });
+  return{accepted:accepted,rejected:rejected};
+}
+// ===== LLM Proposal：ProviderResult -> StateChange -> ChangeSet（before 一律由系统生成）=====
+var LLMProposalBridge={
+  toStateChanges:function(input){
+    input=input||{};
+    var chapterId=String(input.chapterId||'');
+    var chapter=input.chapter||{};
+    var extraction=input.extraction||normalizeChapterExtraction({});
+    var verified=input.verified||{};
+    var chapterIndex=(typeof input.chapterIndex==='number')?input.chapterIndex:0;
+    var now=(typeof input.now==='number')?input.now:Date.now();
+    var drafts=[],rejected=[];
+    // before 一律由系统从"规范化快照"生成（与前置条件/verify 同一视图），绝不用 LLM 提供的状态
+    var normalized=(StoryStore.snapshot().chapters||[]).filter(function(c){return c.id===chapterId;})[0]||chapter;
+    var existing=(normalized&&normalized.aiAnalysis)?normalized.aiAnalysis:null;
+    var afterAnalysis={
+      characters:extraction.characters.map(function(c){return c.name;}),
+      locations:extraction.locations.map(function(l){return l.name;}),
+      events:extraction.events.map(function(e){return e.event;}),
+      foreshadowHits:extraction.foreshadowing.map(function(f){return f.content;}),
+      emotions:extraction.emotions.map(function(e){return e.emotion;}),
+      timeHints:extraction.timeline.map(function(t){return t.time;}),
+      lastParsed:now
+    };
+    if(StoryStore.hash(afterAnalysis)!==StoryStore.hash(existing)){
+      drafts.push({actionId:'llm:aiAnalysis:'+chapterId,type:'update',
+        target:{entityType:'chapter',entityId:chapterId,displayName:chapterId},
+        path:'chapters.'+chapterId+'.aiAnalysis',before:existing,after:afterAnalysis,
+        reason:'LLM 结构化抽取（人物 '+extraction.characters.length+' / 事件 '+extraction.events.length+'）',
+        evidence:(verified[chapterId]||[]).slice(0,1),confidence:0.7});
+    }
+    extraction.characters.forEach(function(c){
+      var r=StoryEngine.resolveEntity(c.name);
+      if(r&&r.status==='resolved')return;
+      var ev=(verified[c.name]||[]);
+      if(!ev.length){rejected.push({kind:'character',name:c.name,reason:'缺少可验证 evidence（拒绝创建）'});return;}
+      var id=StoryStore.nextId('characters');
+      drafts.push({actionId:'llm:character:'+c.name,type:'add',
+        target:{entityType:'character',entityId:id,displayName:c.name},
+        path:'characters.'+id,before:null,
+        after:{id:id,name:c.name,gender:'',age:'',charType:'supporting',tags:['llm'],aliases:[],fields:{},relations:[],
+          presence:{firstAppear:chapterIndex,lastAppear:chapterIndex,chapterIds:[chapterIndex],appearCount:0},
+          aiProfile:{arcStage:'',consistencyScore:100,importance:5}},
+        reason:'LLM 抽取到新角色「'+c.name+'」',evidence:ev,confidence:0.7});
+    });
+    extraction.foreshadowing.forEach(function(f){
+      var ev=(verified['fs:'+f.content]||[]);
+      if(!ev.length){rejected.push({kind:'foreshadowing',content:f.content,reason:'伏笔变更必须携带可验证 evidence'});return;}
+      var id=StoryStore.nextId('foreshadowing');
+      drafts.push({actionId:'llm:foreshadowing:'+f.content,type:'add',
+        target:{entityType:'foreshadow',entityId:id,displayName:f.content},
+        path:'foreshadowing.'+id,before:null,
+        after:{id:id,content:f.content,chapterPlaced:chapterIndex,chapterExpected:0,status:'pending',note:'LLM 抽取',linkedChapterId:null},
+        reason:'LLM 抽取到伏笔',evidence:ev,confidence:0.65});
+    });
+    extraction.relationships.forEach(function(rel){
+      var a=StoryEngine.resolveEntity(rel.from),b=StoryEngine.resolveEntity(rel.to);
+      if(!a||!b||a.status!=='resolved'||b.status!=='resolved'){
+        rejected.push({kind:'relationship',from:rel.from,to:rel.to,reason:'实体未解析，无法建立关系'});
+        return;
+      }
+      var id=StoryStore.nextId('relationships');
+      drafts.push({actionId:'llm:relationship:'+a.entityRef.entityId+'>'+b.entityRef.entityId,type:'add',
+        target:{entityType:'relationship',entityId:id,displayName:rel.from+'->'+rel.to},
+        path:'relationships.'+id,before:null,
+        after:{id:id,fromId:a.entityRef.entityId,toId:b.entityRef.entityId,type:rel.type||'关联',note:'LLM 抽取'},
+        reason:'LLM 抽取出关系',evidence:[],confidence:0.6});
+    });
+    return{drafts:drafts,rejected:rejected};
+  },
+  propose:function(input){
+    input=input||{};
+    var built=LLMProposalBridge.toStateChanges(input);
+    if(!built.drafts.length)return null;
+    var res=input.providerResult||null;
+    var cs=ChangeSetRuntime.propose({
+      source:'LLM.'+String(res?res.provider:'unknown'),
+      operation:'llm_extraction',
+      reason:'LLM 章节抽取提案（必须人工审批）',
+      evidence:[],
+      changes:built.drafts,
+      baseStateHash:StoryStore.hash(StoryStore.state)
+    },input.options||{});
+    cs.origin='llm';
+    cs.requiresHumanApproval=true;
+    cs.chapterId=String(input.chapterId||'');
+    cs.llm={provider:String(res?res.provider:''),model:String(res?res.model:''),requestId:String(res?res.requestId:''),
+      promptHash:StoryStore.hash({input:String((input.chapter&&input.chapter.content)||'').slice(0,500),task:'chapter_extraction'}),
+      usage:res?res.usage:null,latencyMs:res?(res.latencyMs||0):0};
+    cs.rejectedFacts=built.rejected;
+    cs.policy=StoryPolicy.evaluateChangeSet(cs);
+    return cs;
+  }
+};
+// ===== ChapterAnalysis 接入：LLM 是增强层，失败一律降级到确定性解析器 =====
+var LLMChapterAnalysis={
+  lastError:null,lastResult:null,
+  analyzeChapter:function(chapterId,options){
+    var opts=options||{};
+    var chapter=StoryStore.getChapter(chapterId);
+    if(!chapter)return null;
+    var chapterIndex=StoryStore.getChapters().indexOf(chapter);
+    function deterministic(reason,providerResult,errors,extras){
+      var out={source:'deterministic',chapterId:chapterId,analysis:StoryEngine.analyzeChapter(chapterId,{now:opts.now}),
+        extraction:null,providerResult:providerResult||null,changeSet:null,drafts:[],rejectedFacts:[],
+        evidenceRejected:[],errors:errors||[],fallback:!!reason,reason:reason||'',llmEnabled:false,
+        summary:null};
+      if(extras)Object.keys(extras).forEach(function(k){out[k]=extras[k];});
+      LLMChapterAnalysis.lastResult=out;
+      return out;
+    }
+    var provider=ProviderRuntime.resolve(opts);
+    if(!provider)return deterministic('LLM disabled：未配置或未启用 Provider',null,[]);
+    var cfg=ProviderRuntime.config(opts);
+    var request={input:String(chapter.content||''),chapterId:String(chapterId),task:'chapter_extraction',
+      system:'你是小说结构化抽取器。只输出 JSON：{"characters":[{"name":"","evidence":[{"start":0,"end":2}]}],"locations":[],"events":[],"relationships":[],"foreshadowing":[],"timeline":[],"emotions":[]}'};
+    var res=ProviderRuntime.complete(provider,request,{schema:ChapterExtractionSchema,
+      timeoutMs:cfg.timeoutMs,maxRetries:cfg.maxRetries,maxTokens:cfg.maxTokens,temperature:cfg.temperature,
+      budget:{maxInputTokens:cfg.maxInputTokens,maxOutputTokens:cfg.maxOutputTokens},requestId:opts.requestId});
+    if(isThenable(res))return res.then(function(r){return LLMChapterAnalysis.finish(chapterId,chapter,chapterIndex,r,opts,deterministic);});
+    return LLMChapterAnalysis.finish(chapterId,chapter,chapterIndex,res,opts,deterministic);
+  },
+  finish:function(chapterId,chapter,chapterIndex,res,opts,deterministic){
+    if(!res||!res.success){
+      LLMChapterAnalysis.lastError=res?res.error:makeProviderError(ProviderErrors.UNKNOWN_ERROR,'无 ProviderResult');
+      return deterministic('LLM failed -> deterministic fallback',res,[LLMChapterAnalysis.lastError].filter(Boolean));
+    }
+    var v=ChapterExtractionSchema.validate(res.structured);
+    if(!v.valid){
+      LLMChapterAnalysis.lastError=makeProviderError(ProviderErrors.SCHEMA_ERROR,v.errors.join('; '));
+      return deterministic('schema failed -> reject -> deterministic fallback',res,[LLMChapterAnalysis.lastError]);
+    }
+    var extraction=normalizeChapterExtraction(res.structured);
+    var text=String(chapter.content||'');
+    var verified={},evidenceRejected=[];
+    verified[chapterId]=[];
+    extraction.characters.forEach(function(c){
+      var out=revalidateEvidence(c.evidence,chapterId,text);
+      verified[c.name]=out.accepted;
+      out.rejected.forEach(function(r){evidenceRejected.push({kind:'character',name:c.name,reason:r.reason});});
+      if(out.accepted.length)verified[chapterId]=verified[chapterId].concat(out.accepted.slice(0,1));
+    });
+    extraction.foreshadowing.forEach(function(f){
+      var out=revalidateEvidence(f.evidence,chapterId,text);
+      verified['fs:'+f.content]=out.accepted;
+      out.rejected.forEach(function(r){evidenceRejected.push({kind:'foreshadowing',content:f.content,reason:r.reason});});
+    });
+    var built=LLMProposalBridge.toStateChanges({chapterId:chapterId,chapter:chapter,chapterIndex:chapterIndex,
+      extraction:extraction,verified:verified,providerResult:res,now:opts.now});
+    var cs=LLMProposalBridge.propose({chapterId:chapterId,chapter:chapter,chapterIndex:chapterIndex,
+      extraction:extraction,verified:verified,providerResult:res,options:opts});
+    var out2={source:'llm',chapterId:chapterId,analysis:StoryEngine.analyzeChapter(chapterId,{now:opts.now}),
+      extraction:extraction,providerResult:res,changeSet:cs,drafts:built.drafts,rejectedFacts:built.rejected,
+      evidenceRejected:evidenceRejected,errors:[],fallback:false,reason:'',llmEnabled:true,
+      summary:{provider:res.provider,model:res.model,requestId:res.requestId,latencyMs:res.latencyMs,usage:res.usage,
+        characters:extraction.characters.length,foreshadowing:extraction.foreshadowing.length,
+        relationships:extraction.relationships.length}};
+    LLMChapterAnalysis.lastResult=out2;
+    return out2;
+  },
+  // 真实 LLM 产生的变更集只能由"人"批准：系统批准人一律拒绝
+  applyApproved:function(changeSet,approver,options){
+    if(!changeSet)return{ok:false,status:'REJECTED',errors:['changeSet: required']};
+    var v=ChangeSetRuntime.validate(changeSet,options||{});
+    if(!v.ok)return{ok:false,status:changeSet.status,errors:v.validation.errors};
+    var ap=ChangeSetRuntime.approve(changeSet,String(approver||''),options||{});
+    if(!ap.ok)return{ok:false,status:changeSet.status,errors:ap.errors};
+    var res=ChangeSetRuntime.apply(changeSet,options||{});
+    return{ok:!!res.ok,status:changeSet.status,verified:res.verification||null,results:res.results||[],errors:res.errors||[]};
+  }
+};
+
+AIRuntime.ProviderErrors=ProviderErrors;
+AIRuntime.ProviderRegistry=ProviderRegistry;
+AIRuntime.ProviderSettings=ProviderSettings;
+AIRuntime.ProviderRuntime=ProviderRuntime;
+AIRuntime.MockAIProvider=MockAIProvider;
+AIRuntime.OpenAICompatibleProvider=OpenAICompatibleProvider;
+AIRuntime.OllamaProvider=OllamaProvider;
+AIRuntime.AIProviderContract=AIProviderContract;
+AIRuntime.validateProviderResult=validateProviderResult;
+AIRuntime.makeProviderResult=makeProviderResult;
+AIRuntime.ChapterExtractionSchema=ChapterExtractionSchema;
+AIRuntime.LLMProposalBridge=LLMProposalBridge;
+AIRuntime.LLMChapterAnalysis=LLMChapterAnalysis;
+AIRuntime.revalidateEvidence=revalidateEvidence;
+AIRuntime.normalizeChapterExtraction=normalizeChapterExtraction;
+
 // ===== UI Layer =====
 var curPage='dashboard';var curChId=null;var curView='list';
 
@@ -3680,11 +4805,137 @@ function rDataC(el){
 
 function rSettings(el){
   var meta=StoryStore.getMeta();
-  el.innerHTML='<div class="card"><div class="card-title">项目设置</div><div class="form-group"><label class="form-label">小说标题</label><input class="form-input" value="'+(meta.title||'')+'" oninput="StoryStore.setMeta(\'title\',this.value)" /></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" onchange="StoryStore.setMeta(\'genre\',this.value)">'+Object.keys(GENRE_CONFIG).map(function(k){return'<option value="'+k+'"'+(meta.genre===k?' selected':'')+'>'+GENRE_CONFIG[k].name+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">每日目标字数</label><input class="form-input" type="number" value="'+(meta.dailyGoal||4000)+'" onchange="StoryStore.setMeta(\'dailyGoal\',parseInt(this.value))" /></div></div><div class="card"><div class="card-title">外观</div><div class="form-group"><label class="form-label">主题</label><select class="form-select" onchange="setTheme(this.value)"><option value="dark"'+(meta.theme==='dark'?' selected':'')+'>深色</option><option value="light"'+(meta.theme==='light'?' selected':'')+'>浅色</option><option value="warm"'+(meta.theme==='warm'?' selected':'')+'>暖色</option></select></div><div class="form-group"><label class="form-label">字体大小: '+(meta.fontSize||15)+'px</label><input type="range" min="12" max="20" value="'+(meta.fontSize||15)+'" oninput="setFontSize(this.value)" style="width:100%" /></div></div>';
+  el.innerHTML='<div class="card"><div class="card-title">项目设置</div><div class="form-group"><label class="form-label">小说标题</label><input class="form-input" value="'+(meta.title||'')+'" oninput="StoryStore.setMeta(\'title\',this.value)" /></div><div class="form-group"><label class="form-label">类型</label><select class="form-select" onchange="StoryStore.setMeta(\'genre\',this.value)">'+Object.keys(GENRE_CONFIG).map(function(k){return'<option value="'+k+'"'+(meta.genre===k?' selected':'')+'>'+GENRE_CONFIG[k].name+'</option>';}).join('')+'</select></div><div class="form-group"><label class="form-label">每日目标字数</label><input class="form-input" type="number" value="'+(meta.dailyGoal||4000)+'" onchange="StoryStore.setMeta(\'dailyGoal\',parseInt(this.value))" /></div></div><div class="card"><div class="card-title">外观</div><div class="form-group"><label class="form-label">主题</label><select class="form-select" onchange="setTheme(this.value)"><option value="dark"'+(meta.theme==='dark'?' selected':'')+'>深色</option><option value="light"'+(meta.theme==='light'?' selected':'')+'>浅色</option><option value="warm"'+(meta.theme==='warm'?' selected':'')+'>暖色</option></select></div><div class="form-group"><label class="form-label">字体大小: '+(meta.fontSize||15)+'px</label><input type="range" min="12" max="20" value="'+(meta.fontSize||15)+'" oninput="setFontSize(this.value)" style="width:100%" /></div></div>'+providerSettingsHTML();
 }
 
 // ===== Event Handlers =====
 var _lastActionPlans=[];
+
+// ===== Phase 5.4: Provider 设置 UI（API Key 只存本机独立配置，不进入 StoryState）=====
+function providerSettingsHTML(){
+  var cfg=ProviderSettings.load();
+  var m=ProviderSettings.masked(cfg);
+  var kinds=ProviderRegistry.kinds();
+  var status=cfg.enabled?('<span class="badge badge-success">已启用</span>'):'<span class="badge badge-info">未启用（离线确定性模式）</span>';
+  return '<div class="card"><div class="card-title">AI Provider '+status+'</div>'+
+    '<div class="form-group"><label class="form-label">Provider</label><select class="form-select" onchange="setProviderConfig(\'provider\',this.value)">'+
+      kinds.map(function(k){return '<option value="'+k+'"'+(cfg.provider===k?' selected':'')+'>'+k+'</option>';}).join('')+'</select></div>'+
+    '<div class="form-group"><label class="form-label">Base URL</label><input class="form-input" value="'+(m.baseURL||'')+'" placeholder="例如 https://api.deepseek.com/v1" onchange="setProviderConfig(\'baseURL\',this.value)" /></div>'+
+    '<div class="form-group"><label class="form-label">Model</label><input class="form-input" value="'+(m.model||'')+'" placeholder="例如 deepseek-chat" onchange="setProviderConfig(\'model\',this.value)" /></div>'+
+    '<div class="form-group"><label class="form-label">API Key</label><input class="form-input" type="password" value="'+(cfg.apiKey||'')+'" placeholder="'+(m.hasApiKey?'已保存（'+m.apiKeyMasked+'）':'未设置')+'" onchange="setProviderConfig(\'apiKey\',this.value)" /></div>'+
+    '<div class="form-group"><label class="form-label">Temperature</label><input class="form-input" type="number" step="0.1" min="0" max="2" value="'+(cfg.temperature||0.2)+'" onchange="setProviderConfig(\'temperature\',parseFloat(this.value))" /></div>'+
+    '<div class="form-group"><label class="form-label">Max Tokens</label><input class="form-input" type="number" value="'+(cfg.maxTokens||1024)+'" onchange="setProviderConfig(\'maxTokens\',parseInt(this.value))" /></div>'+
+    '<div class="form-group"><label class="form-label">Timeout (ms)</label><input class="form-input" type="number" value="'+(cfg.timeoutMs||15000)+'" onchange="setProviderConfig(\'timeoutMs\',parseInt(this.value))" /></div>'+
+    '<div class="form-group"><label class="form-label">Max Retries</label><input class="form-input" type="number" value="'+(cfg.maxRetries||0)+'" onchange="setProviderConfig(\'maxRetries\',parseInt(this.value))" /></div>'+
+    '<div class="flex gap-1 mt-1"><button class="btn btn-primary" onclick="toggleProvider()">'+(cfg.enabled?'停用 LLM':'启用 LLM')+'</button>'+
+      '<button class="btn" onclick="testProviderConnection()">测试连接</button>'+
+      '<button class="btn" onclick="clearProviderConfig()">清除配置</button></div>'+
+    '<p class="text-muted text-sm mt-1">API Key 仅保存在本机浏览器存储（'+PROVIDER_CONFIG_KEY+'），不会写入 StoryState、导出 JSON、ChangeSet 或审计账本。仍存在本机被读取的风险。</p>'+
+    '</div>';
+}
+function setProviderConfig(field,value){
+  var cfg=ProviderSettings.load();
+  cfg[String(field)]=value;
+  ProviderSettings.save(cfg);
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  return cfg;
+}
+function toggleProvider(){
+  var cfg=ProviderSettings.load();
+  cfg.enabled=!cfg.enabled;
+  ProviderSettings.save(cfg);
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  toast(cfg.enabled?'LLM 已启用（真实调用需配置 Base URL / Model / API Key）':'LLM 已停用（使用确定性解析器）','info');
+  return cfg.enabled;
+}
+function clearProviderConfig(){
+  ProviderSettings.clear();
+  var el=document.getElementById('page-settings');
+  if(el)rSettings(el);
+  toast('Provider 配置已清除','info');
+  return true;
+}
+function testProviderConnection(){
+  var cfg=ProviderSettings.load();
+  var provider=ProviderRegistry.create(cfg);
+  if(!provider)return{ok:false,error:ProviderErrors.CONFIG_ERROR};
+  var res=ProviderRuntime.complete(provider,{input:'测试连接：林默走进客栈。',chapterId:'__smoke__',task:'chapter_extraction'},
+    {schema:ChapterExtractionSchema,timeoutMs:cfg.timeoutMs,maxRetries:0,maxTokens:64});
+  if(isThenable(res)){
+    return res.then(function(r){toast(r.success?('连接成功: '+r.provider+' / '+r.model):('连接失败: '+(r.error&&r.error.code)),r.success?'success':'error');return r;});
+  }
+  toast(res.success?('连接成功: '+res.provider+' / '+res.model):('连接失败: '+(res.error&&res.error.code)),res.success?'success':'error');
+  return res;
+}
+// ===== Copilot: LLM 分析（复用 Issue / Action / ChangeSet / Evidence 展示，不新建第二套 AI UI）=====
+var _pendingLLMChangeSet=null;
+var _lastLLMAnalysis=null;
+function llmStatusHTML(result){
+  if(!result)return '<div class="action-card"><div class="action-desc">尚未运行 LLM 分析。</div></div>';
+  var s=result.summary||{};
+  var cfg=ProviderSettings.masked();
+  var state=result.source==='llm'?('<span class="badge badge-success">LLM 成功</span>'):('<span class="badge badge-warning">降级：确定性解析</span>');
+  return '<div class="action-card"><div class="action-header"><span class="action-title">LLM 分析</span>'+state+'</div>'+
+    '<div class="action-desc">Provider: '+((s.provider)||cfg.provider||'-')+' · Model: '+((s.model)||cfg.model||'-')+'</div>'+
+    (result.reason?('<div class="action-desc text-muted">原因: '+result.reason+'</div>'):'')+
+    (result.errors&&result.errors.length?('<div class="action-desc text-muted">错误: '+result.errors.map(function(e){return e&&e.code?e.code:e;}).join(', ')+'</div>'):'')+
+    (s.latencyMs!==undefined?('<div class="action-desc text-muted">latency: '+s.latencyMs+'ms · requestId: '+(s.requestId||'-')+'</div>'):'')+
+    '</div>';
+}
+function runLLMAnalysis(){
+  if(!curChId)return null;
+  var result=LLMChapterAnalysis.analyzeChapter(curChId,{});
+  function render(r){
+    _lastLLMAnalysis=r;
+    _pendingLLMChangeSet=r?r.changeSet:null;
+    var el=document.getElementById('copilotIssues');
+    if(el){
+      var html=llmStatusHTML(r);
+      if(r&&r.changeSet&&r.changeSet.changes.length){
+        html+='<div class="action-card"><div class="action-header"><span class="action-title">LLM 提案（需人工审批）</span>'+
+          '<span class="badge badge-'+(r.changeSet.policy&&r.changeSet.policy.allowed?'warning':'danger')+'">'+(r.changeSet.changes.length)+' 项变更</span></div>'+
+          '<div class="action-desc">'+r.changeSet.changes.map(function(c){return c.type+' '+c.path;}).join('<br/>')+'</div>'+
+          '<div class="action-desc text-muted">ChangeSet: '+r.changeSet.changeSetId+'</div>'+
+          '<div class="action-actions"><button class="btn btn-sm btn-primary" onclick="approveLLMAnalysis()">采用（人工批准）</button>'+
+          '<button class="btn btn-sm" onclick="rejectLLMAnalysis()">忽略</button></div></div>';
+      }
+      if(r&&r.rejectedFacts&&r.rejectedFacts.length){
+        html+=r.rejectedFacts.map(function(x){return '<div class="action-card severity-warning"><div class="action-desc">已拒绝：'+
+          (x.kind||'')+' '+(x.name||x.content||x.from||'')+' — '+x.reason+'</div></div>';}).join('');
+      }
+      el.innerHTML=html;
+    }
+    if(r&&r.source==='llm')toast('LLM 分析完成（需人工审批）','success');
+    else toast('LLM 不可用，已降级为确定性解析','info');
+    return r;
+  }
+  if(isThenable(result))return result.then(render);
+  return render(result);
+}
+function approveLLMAnalysis(){
+  if(!_pendingLLMChangeSet)return{ok:false,status:'REJECTED',errors:['no pending llm changeset']};
+  var approver='author:'+String((StoryStore.getMeta()||{}).title||'author');
+  var res=LLMChapterAnalysis.applyApproved(_pendingLLMChangeSet,approver,{});
+  toast(res.ok?'LLM 提案已批准并应用（'+((_pendingLLMChangeSet.changes||[]).length)+' 项变更）':'LLM 提案未应用：'+(res.errors||[]).join('；'),res.ok?'success':'error');
+  _pendingLLMChangeSet=null;
+  runCopilot();
+  return res;
+}
+function rejectLLMAnalysis(){
+  if(!_pendingLLMChangeSet)return{ok:false,status:'REJECTED',errors:['no pending llm changeset']};
+  var cs=_pendingLLMChangeSet;
+  ChangeSetRuntime.validate(cs,{});
+  var res=ChangeSetRuntime.reject(cs,'作者拒绝 LLM 提案',{});
+  StoryStore.appendActionDecision({planId:cs.changeSetId,actionId:cs.actionId||'',ruleId:'llm_extraction',
+    issueId:'',action:cs.operation,decision:'rejected',changeSetIds:[],hasChanges:false,changeCount:0,executedCount:0,
+    reason:'作者拒绝 LLM 提案',at:Date.now()});
+  toast('LLM 提案已拒绝（REJECTED 已记录审计）','info');
+  _pendingLLMChangeSet=null;
+  return res;
+}
+
 function addChapter(){var ch=StoryStore.addChapter({});renderSidebar('editor');rEditor(document.getElementById('page-editor'));selectChapter(ch.id);toast('已创建新章节','success');}
 function selectChapter(id){curChId=id;var ch=StoryStore.getChapter(id);if(!ch)return;var ta=document.getElementById('chEditor');if(ta)ta.value=ch.content||'';var titleInput=document.getElementById('chTitleInput');if(titleInput)titleInput.value=ch.title;var wc=document.getElementById('chWordCount');if(wc)wc.textContent=(ch.wordCount||0)+'字';renderSidebar('editor');document.querySelectorAll('.chapter-list-item').forEach(function(i){i.classList.remove('active');});}
 function updateChTitle(val){if(!curChId)return;StoryStore.updateChapter(curChId,{title:val});renderSidebar('editor');}

@@ -1,7 +1,7 @@
 # Story OS Novel IDE
 
 **版本**: v0.2.0
-**阶段**: Phase 5.3 - Runtime Action Migration & Explainable Consistency（基线 Phase 4 / 5.1 / 5.2 全部保留）
+**阶段**: Phase 5.4 - AI Provider Contract & Safe LLM Integration（基线 Phase 4 / 5.1 / 5.2 / 5.3 全部保留）
 **定位**: AI 驱动的小说创作与叙事状态管理 IDE
 
 ## 核心架构
@@ -23,7 +23,9 @@ ChangeSet Runtime (Proposed → Validating → Valid → Approved → Applied �
     ↓
 ExecutionLayer → StoryStore.applyChange (唯一写入口)
     ↓
-AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
+AI Provider (Phase 5.4: Mock / OpenAI-compatible / Ollama)
+    ↓
+ProviderResult → Schema → Evidence 重验证 → Proposal → ChangeSet（人工审批）
 ```
 
 ## 已完成
@@ -38,7 +40,7 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **幂等执行** - 决策 hash 去重，防止重复执行
 - **一致性检查** - 基于真实 StoryState + 规则系统，无随机模拟
 - **数据持久化** - localStorage 自动保存 + 旧版本数据迁移
-- **Regression Test** - 104 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项 + Phase 5.2 的 35 项全部保留）
+- **Regression Test** - 147 项自动化回归测试（Phase 4 的 10 项 + Phase 5.1 的 24 项 + Phase 5.2 的 35 项 + Phase 5.3 的 35 项全部保留）
 - **Copilot 面板** - 章节编辑器右侧实时展示 AI 诊断与可执行动作
 
 ### Phase 5.1 新增
@@ -86,10 +88,28 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 - **文档** - `docs/phase5.3-action-consistency.md`
 
 
+### Phase 5.4 新增
+
+- **Provider Contract** - `AIProviderContract.validate()`；`complete(request, options)` / `stream(request, onChunk, options)`（返回值或 thenable 皆可）
+- **ProviderResult** - 10 字段契约（provider / model / requestId / success / output / structured / usage / latencyMs / error / rawResponse），`output` 只能是数据
+- **MockAIProvider** - 默认离线、无 API Key、无网络、确定性；覆盖 success / timeout / network / auth / rate_limit / malformed_json / schema_error / empty / provider_error
+- **OpenAI-compatible Provider** - 一个实现覆盖 OpenAI / DeepSeek / Kimi / 通义 / 智谱；`baseURL` + `model` + `apiKey`，transport 可注入（回归测试永不触网）
+- **Ollama Provider** - 最低支持 `baseURL` + `model`（`/api/chat`，无需 API Key）
+- **结构化输出契约** - Chapter Extraction 7 字段 + `ChapterExtractionSchema` + `normalizeChapterExtraction()`（JSON → Parse → Schema → Normalize，解析失败绝不猜测）
+- **Evidence 重新验证** - `revalidateEvidence()`：系统重新读取原文并 slice，`excerpt !== slice` 一律拒绝
+- **LLM Proposal** - `LLMProposalBridge`：抽取结果 → StateChange（`before` 由系统从规范化快照生成）→ ChangeSet
+- **降级链** - `LLMChapterAnalysis.analyzeChapter()`：未启用 / 请求失败 / schema 非法 → 确定性解析器（Phase 4 解析器永不删除）
+- **人工审批硬门** - `requiresHumanApproval` 的 ChangeSet 拒绝 `system` / `compat:*` / `auto` 批准人
+- **Provider 设置页** - Provider / Base URL / Model / API Key / Temperature / Max Tokens / Timeout / Max Retries / 启用 LLM；API Key 存独立 localStorage 键，**不进入 StoryState / 导出 / ChangeSet / 账本**
+- **审计字段** - 账本新增 `origin` 与 `llm:{ provider, model, requestId, promptHash, usage, latencyMs }`（只存 promptHash，不存完整 prompt 与密钥）
+- **Copilot「LLM 分析」** - 展示 Provider / Model / 状态 / 提案，复用既有 Issue / ChangeSet / Evidence 展示与人工采用/忽略
+- **文档** - `docs/phase5.4-provider-contract.md`
+
+
 ## 未完成
 
-- 真实 LLM Provider（DeepSeek / OpenAI-compatible / 本地模型）
-- 更强的语义解析（当前为关键词匹配）
+- 真实 LLM 端到端验证（Provider 契约已实现，但未用真实 API Key 做 smoke test）
+- 更强的语义解析（确定性解析器仍是基线，LLM 为可选增强层）
 - 更强的时间线推理
 - 更强的角色一致性分析
 - 多章节上下文窗口
@@ -113,7 +133,8 @@ AI Provider (抽象接口 - 尚未接入，当前无真实 LLM)
 ├── docs/                    # 文档目录
 │   ├── phase5-runtime-contract.md   # Phase 5.1 状态契约与可审计变更
 │   ├── phase5.2-chapter-analysis.md # Phase 5.2 章节分析与受控运行时迁移
-│   └── phase5.3-action-consistency.md # Phase 5.3 运行时 Action 迁移与可解释一致性
+│   ├── phase5.3-action-consistency.md # Phase 5.3 运行时 Action 迁移与可解释一致性
+│   └── phase5.4-provider-contract.md  # Phase 5.4 Provider 契约与安全 LLM 接入
 ├── backup/                 # 原始备份（不提交 Git）
 │   └── phase-4-complete-original/
 ├── README.md
@@ -140,9 +161,10 @@ node tests/regression-tests.js
 | SCHEMA_VERSION | 2 |
 | CONTRACT_VERSION | 5.1 |
 | Rules | 16 |
-| Regression Tests | 104/104 PASS |
-| ChapterAnalysis | Phase 5.2（确定性解析，无 LLM） |
+| Regression Tests | 147/147 PASS |
+| ChapterAnalysis | Phase 5.2（确定性解析为基线，Phase 5.4 起 LLM 为可选增强层） |
 | Consistency | Phase 5.3（确定性评分，Issues 为事实来源） |
+| AI Provider | Phase 5.4（Mock / OpenAI-compatible / Ollama；真实 Provider 未做 smoke test） |
 | 真实 LLM | 未接入（Phase 5.1 / 5.2 均不含 Provider） |
 
 ## License
